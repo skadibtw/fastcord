@@ -3,6 +3,10 @@
 
 use std::sync::OnceLock;
 
+#[path = "clock_format/date.rs"]
+mod date;
+pub use date::DatePattern;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DateOrder {
     DayMonthYear,
@@ -10,26 +14,41 @@ pub enum DateOrder {
     YearMonthDay,
 }
 
-static DATE_ORDER: OnceLock<Option<DateOrder>> = OnceLock::new();
+static DATE_PATTERN: OnceLock<Option<DatePattern>> = OnceLock::new();
 static HOUR12: OnceLock<Option<bool>> = OnceLock::new();
 
 pub fn initialize() {
     HOUR12.get_or_init(detect);
-    DATE_ORDER.get_or_init(|| {
-        #[cfg(target_os = "linux")]
-        {
-            linux::read_date(c"")
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
-    });
+    DATE_PATTERN.get_or_init(detect_date);
 }
 
-/// Cached ordering only; separators, calendar and digits are not localized.
+/// The supported numeric pattern, initialized only by the blocking startup loader.
+pub fn date_pattern() -> Option<&'static DatePattern> {
+    DATE_PATTERN.get().and_then(Option::as_ref)
+}
+
+/// Field order for application-language named dates; no native formatting call.
 pub fn date_order() -> Option<DateOrder> {
-    DATE_ORDER.get().copied().flatten()
+    date_pattern().and_then(DatePattern::order)
+}
+
+fn detect_date() -> Option<DatePattern> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::read_date(c"")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::read_date()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::read_date()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// `None` until initialization, or when no supported preference is available.
@@ -77,8 +96,10 @@ mod linux {
         read_item(name, libc::T_FMT, super::parse)
     }
 
-    pub(super) fn read_date(name: &CStr) -> Option<super::DateOrder> {
-        read_item(name, libc::D_FMT, super::parse_date)
+    pub(super) fn read_date(name: &CStr) -> Option<super::DatePattern> {
+        read_item(name, libc::D_FMT, |bytes| {
+            super::DatePattern::from_posix(std::str::from_utf8(bytes).ok()?)
+        })
     }
 
     fn read_item<T>(
@@ -139,46 +160,6 @@ fn parse(format: &[u8]) -> Option<bool> {
     result
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn parse_date(format: &[u8]) -> Option<DateOrder> {
-    let mut fields = Vec::with_capacity(3);
-    let mut bytes = format.iter().copied();
-    while let Some(byte) = bytes.next() {
-        if byte != b'%' {
-            continue;
-        }
-        let mut directive = bytes.next()?;
-        if directive == b'%' {
-            continue;
-        }
-        while matches!(
-            directive,
-            b'E' | b'O' | b'_' | b'-' | b'0'..=b'9' | b'^' | b'#'
-        ) {
-            directive = bytes.next()?;
-        }
-        let added: &[u8] = match directive {
-            b'd' | b'e' => b"d",
-            b'm' | b'b' | b'B' | b'h' => b"m",
-            b'y' | b'Y' => b"y",
-            b'D' => b"mdy",
-            b'F' => b"ymd",
-            // Composite/era forms not understood here must use the fallback.
-            _ => return None,
-        };
-        fields.extend_from_slice(added);
-        if fields.len() > 3 {
-            return None;
-        }
-    }
-    match fields.as_slice() {
-        b"dmy" => Some(DateOrder::DayMonthYear),
-        b"mdy" => Some(DateOrder::MonthDayYear),
-        b"ymd" => Some(DateOrder::YearMonthDay),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,28 +181,13 @@ mod tests {
     #[test]
     fn native_c_locale_is_24_hour_and_unknown_locale_is_unavailable() {
         assert_eq!(linux::read(c"C"), Some(false));
-        assert_eq!(linux::read_date(c"C"), Some(DateOrder::MonthDayYear));
+        assert_eq!(
+            linux::read_date(c"C")
+                .unwrap()
+                .format(2001, 2, 3)
+                .as_deref(),
+            Some("02/03/01")
+        );
         assert_eq!(linux::read(c"fastcord-nonexistent-locale"), None);
-    }
-    #[test]
-    fn date_order_uses_directives_not_region_guesses() {
-        for format in [b"%d.%m.%Y".as_slice(), b"%e %b %Y", b"%Od/%Om/%EY"] {
-            assert_eq!(parse_date(format), Some(DateOrder::DayMonthYear));
-        }
-        for format in [b"%m/%d/%y".as_slice(), b"%D", b"%%d %m %e %Y"] {
-            assert_eq!(parse_date(format), Some(DateOrder::MonthDayYear));
-        }
-        for format in [b"%Y-%m-%d".as_slice(), b"%F", "%Y年%m月%d日".as_bytes()] {
-            assert_eq!(parse_date(format), Some(DateOrder::YearMonthDay));
-        }
-        for format in [
-            b"%x".as_slice(),
-            b"%Y %m",
-            b"%d %m %Y %Y",
-            b"%m %Y %d",
-            b"%",
-        ] {
-            assert_eq!(parse_date(format), None);
-        }
     }
 }

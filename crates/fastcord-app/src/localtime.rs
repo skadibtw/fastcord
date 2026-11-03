@@ -63,20 +63,49 @@ const DAYS: [&str; 7] = [
 /// `<t:unix:style>` as the official client shows it. `None` if `unix` is out
 /// of the representable range.
 pub fn markup(unix: i64, style: TimeStyle, offset: Option<UtcOffset>, now: i64) -> Option<String> {
-    markup_with_order(
+    markup_with_pattern(
         unix,
         style,
         offset,
         now,
-        fastcord_platform::clock_format::date_order(),
+        fastcord_platform::clock_format::date_pattern(),
     )
 }
 
+#[cfg(test)]
 fn markup_with_order(
     unix: i64,
     style: TimeStyle,
     offset: Option<UtcOffset>,
     now: i64,
+    order: Option<fastcord_platform::clock_format::DateOrder>,
+) -> Option<String> {
+    markup_date(unix, style, offset, now, None, order)
+}
+
+fn markup_with_pattern(
+    unix: i64,
+    style: TimeStyle,
+    offset: Option<UtcOffset>,
+    now: i64,
+    pattern: Option<&fastcord_platform::clock_format::DatePattern>,
+) -> Option<String> {
+    markup_date(
+        unix,
+        style,
+        offset,
+        now,
+        pattern,
+        pattern.and_then(|p| p.order()),
+    )
+}
+
+fn markup_date(
+    unix: i64,
+    style: TimeStyle,
+    offset: Option<UtcOffset>,
+    now: i64,
+    pattern: Option<&fastcord_platform::clock_format::DatePattern>,
     order: Option<fastcord_platform::clock_format::DateOrder>,
 ) -> Option<String> {
     if style == TimeStyle::Relative {
@@ -100,7 +129,9 @@ fn markup_with_order(
             format!("{hm}:{s:02} {suffix}")
         }
         TimeStyle::LongTime => format!("{short}:{s:02}"),
-        TimeStyle::ShortDate => short_date,
+        TimeStyle::ShortDate => pattern
+            .and_then(|p| p.format(y, m as u8, d))
+            .unwrap_or(short_date),
         TimeStyle::LongDate => long_date,
         TimeStyle::ShortDateTime => format!("{long_date} {short}"),
         TimeStyle::LongDateTime => format!(
@@ -254,6 +285,76 @@ mod tests {
         assert_eq!(
             dates(2021, 4, 20, None),
             dates(2021, 4, 20, Some(DayMonthYear))
+        );
+    }
+    #[test]
+    fn compiled_numeric_patterns_drive_actual_markup_without_native_calls() {
+        use fastcord_platform::clock_format::DatePattern;
+        for (source, expected) in [
+            ("%d.%m.%Y", "20.04.2021"),
+            ("%-m/%-d/%y", "4/20/21"),
+            ("%Y年%m月%d日", "2021年04月20日"),
+        ] {
+            let pattern = DatePattern::from_posix(source).unwrap();
+            assert_eq!(
+                markup_with_pattern(AT, TimeStyle::ShortDate, None, AT, Some(&pattern)).as_deref(),
+                Some(expected)
+            );
+            // Numeric patterns never change explicit clock preferences or relative text.
+            assert_eq!(
+                markup_with_pattern(AT, TimeStyle::ShortTime, None, AT, Some(&pattern)),
+                markup_with_pattern(AT, TimeStyle::ShortTime, None, AT, None)
+            );
+            assert_eq!(
+                markup_with_pattern(AT, TimeStyle::Relative, None, AT, Some(&pattern)),
+                markup_with_pattern(AT, TimeStyle::Relative, None, AT, None)
+            );
+        }
+        let pattern = DatePattern::from_posix("%Y-%m-%d").unwrap();
+        assert_eq!(
+            markup_with_pattern(
+                AT,
+                TimeStyle::ShortDate,
+                UtcOffset::from_hms(9, 0, 0).ok(),
+                AT,
+                Some(&pattern)
+            )
+            .as_deref(),
+            Some("2021-04-21")
+        );
+        assert_eq!(
+            markup_with_pattern(AT, TimeStyle::LongDate, None, AT, Some(&pattern)).as_deref(),
+            Some("2021 April 20")
+        );
+        for source in ["%Od/%Om/%EY", "%x", "%Y\n%m %d"] {
+            let unsupported = DatePattern::from_posix(source);
+            assert!(unsupported.is_none());
+            assert_eq!(
+                markup_with_pattern(AT, TimeStyle::ShortDate, None, AT, unsupported.as_ref())
+                    .as_deref(),
+                Some("20/04/2021")
+            );
+        }
+        // No two-digit truncation of nonpositive years or change to checked offset handling.
+        let yy = DatePattern::from_posix("%d/%m/%y").unwrap();
+        let ancient = time::Date::from_calendar_date(-1, time::Month::April, 20)
+            .unwrap()
+            .midnight()
+            .assume_utc()
+            .unix_timestamp();
+        assert_eq!(
+            markup_with_pattern(ancient, TimeStyle::ShortDate, None, AT, Some(&yy)).as_deref(),
+            Some("20/04/-1")
+        );
+        assert_eq!(
+            markup_with_pattern(
+                253_402_300_799,
+                TimeStyle::ShortDate,
+                plus3(),
+                AT,
+                Some(&pattern)
+            ),
+            None
         );
     }
 }
