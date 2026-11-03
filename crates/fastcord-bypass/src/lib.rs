@@ -104,6 +104,15 @@ const CONNECT_RESPONSE_LIMIT: usize = 1024;
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static ENGINE: OnceLock<Engine> = OnceLock::new();
 
+/// The single ownership release, including argument/thread-spawn failures.
+/// On an Engine it is dropped only after its native thread has been joined.
+struct Running;
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::Release);
+    }
+}
+
 #[allow(unsafe_code)]
 mod ffi {
     use std::ffi::{c_char, c_int};
@@ -111,6 +120,7 @@ mod ffi {
     unsafe extern "C" {
         fn fastcord_byedpi_run(argc: c_int, argv: *const *mut c_char) -> c_int;
         fn fastcord_byedpi_request_stop();
+        fn fastcord_byedpi_prepare();
     }
 
     /// Blocks until the engine stops. `argv` ends with a null pointer and its
@@ -121,7 +131,13 @@ mod ffi {
         unsafe { fastcord_byedpi_run(argv.len() as c_int - 1, argv.as_ptr()) }
     }
 
-    /// Takes effect at the engine's next accepted connection.
+    /// Only the exclusive RUNNING owner may reset cancellation before spawn.
+    pub(super) fn prepare() {
+        // SAFETY: the preceding owner joined its worker before releasing RUNNING.
+        unsafe { fastcord_byedpi_prepare() }
+    }
+
+    /// Monotonic cancellation, read before blocking and on an accepted wake.
     pub(super) fn request_stop() {
         // SAFETY: only sets a flag read by the engine thread.
         unsafe { fastcord_byedpi_request_stop() }
@@ -162,6 +178,7 @@ impl From<io::Error> for Error {
 pub struct Engine {
     addr: SocketAddr,
     thread: Option<JoinHandle<c_int>>,
+    _running: Running,
 }
 
 impl Engine {
@@ -171,16 +188,10 @@ impl Engine {
         if RUNNING.swap(true, Ordering::AcqRel) {
             return Err(Error::Busy);
         }
-        match Self::spawn(strategy) {
-            Ok(engine) => Ok(engine),
-            Err(error) => {
-                RUNNING.store(false, Ordering::Release);
-                Err(error)
-            }
-        }
+        Self::spawn(strategy, Running)
     }
 
-    fn spawn(strategy: &str) -> Result<Self, Error> {
+    fn spawn(strategy: &str, running: Running) -> Result<Self, Error> {
         // ponytail: the port is free when probed and taken by byedpi a moment
         // later; a collision shows as NotReady and the user can retry.
         let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
@@ -196,9 +207,12 @@ impl Engine {
             .map(CString::new)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| Error::InvalidStrategy)?;
+        ffi::prepare();
         let thread = thread::Builder::new()
             .name("byedpi".into())
             .spawn(move || {
+                #[cfg(test)]
+                tests::before_native_run();
                 let mut argv: Vec<*mut c_char> =
                     args.iter().map(|arg| arg.as_ptr().cast_mut()).collect();
                 argv.push(std::ptr::null_mut());
@@ -207,6 +221,7 @@ impl Engine {
         let mut engine = Self {
             addr,
             thread: Some(thread),
+            _running: running,
         };
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
@@ -234,11 +249,20 @@ impl Drop for Engine {
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
             ffi::request_stop();
-            // Wakes the event loop; if the engine never listened, it exits on its own.
-            let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_millis(500));
+            // A startup timeout or transient failed connect can precede the
+            // listener. Retry only during shutdown; a live idle engine still
+            // blocks in its native event loop without a polling timer.
+            while !thread.is_finished() {
+                let wake_result =
+                    std::net::TcpStream::connect_timeout(&self.addr, Duration::from_millis(100));
+                #[cfg(test)]
+                tests::after_shutdown_wake(wake_result.is_err());
+                drop(wake_result);
+                thread::sleep(Duration::from_millis(20));
+            }
             let _ = thread.join();
         }
-        RUNNING.store(false, Ordering::Release);
+        // _running releases ownership after this destructor and the join.
     }
 }
 
@@ -321,9 +345,86 @@ mod tests {
     // One engine per process: tests that start one take turns.
     static SERIAL: Mutex<()> = Mutex::new(());
 
+    // Subprocess-only fault injection. A delayed worker cannot enter native
+    // code until the timed-out starter has requested stop AND attempted wake.
+    static BEFORE_RUN: Mutex<Option<std::sync::mpsc::Receiver<()>>> = Mutex::new(None);
+    static AFTER_WAKE: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
+
+    pub(super) fn before_native_run() {
+        let gate = BEFORE_RUN.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.recv().unwrap();
+        }
+    }
+
+    pub(super) fn after_shutdown_wake(failed: bool) {
+        if let Some(gate) = AFTER_WAKE.lock().unwrap().take() {
+            assert!(failed, "gated worker has not opened its listener yet");
+            gate.send(()).unwrap();
+        }
+    }
+
+    /// Runs each ordinary native scenario in its own bounded child. Assertions
+    /// and repeated engine starts remain in that child; no scenario is skipped.
+    fn bounded_subprocess(name: &str) -> bool {
+        if std::env::var("FASTCORD_TEST_BYEDPI_CHILD").as_deref() == Ok(name) {
+            return false;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("tests::{name}"), "--nocapture"])
+            .env("FASTCORD_TEST_BYEDPI_CHILD", name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "native scenario {name} failed: {status}");
+                return true;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("native scenario {name} exceeded 30 seconds; see last phase on stderr");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn readiness_timeout_joins_delayed_native_start_after_failed_wake() {
+        if bounded_subprocess("readiness_timeout_joins_delayed_native_start_after_failed_wake") {
+            return;
+        }
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (release, gate) = std::sync::mpsc::channel();
+        *BEFORE_RUN.lock().unwrap() = Some(gate);
+        *AFTER_WAKE.lock().unwrap() = Some(release);
+        eprintln!("[bypass delayed] startup held until timeout and failed shutdown wake");
+        assert!(matches!(Engine::start("-d1"), Err(Error::NotReady)));
+        assert!(
+            AFTER_WAKE.lock().unwrap().is_none(),
+            "failed wake released delayed startup"
+        );
+        assert!(!RUNNING.load(Ordering::Acquire));
+        // The canceled native entry did not initialize or poison globals. A
+        // later worker owns a fresh stop generation and can start/stop normally.
+        eprintln!("[bypass delayed] canceled worker joined; starting fresh engine");
+        let engine = Engine::start("-d1").unwrap();
+        assert!(matches!(Engine::start("-d1"), Err(Error::Busy)));
+        eprintln!("[bypass delayed] dropping fresh engine");
+        drop(engine);
+        assert!(!RUNNING.load(Ordering::Acquire));
+        eprintln!("[bypass delayed] complete");
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the lock only serializes engines
     async fn relays_a_connection_through_connect() {
+        if bounded_subprocess("relays_a_connection_through_connect") {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = server.local_addr().unwrap().port();
@@ -334,13 +435,22 @@ mod tests {
             socket.write_all(&buf).unwrap();
         });
         // The automatic chain leaves a host that answers on the direct group.
+        eprintln!("[bypass relay] starting Automatic engine");
         let engine = Engine::start(&auto_strategy()).unwrap();
+        eprintln!("[bypass relay] CONNECT to loopback echo");
         let mut stream = connect_via(engine.addr(), "127.0.0.1", port).await.unwrap();
+        eprintln!("[bypass relay] writing echo request");
         stream.write_all(b"hello").await.unwrap();
+        eprintln!("[bypass relay] reading echo response");
         let mut reply = [0; 5];
         stream.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"hello");
+        eprintln!("[bypass relay] joining echo server");
         echo.join().unwrap();
+        drop(stream);
+        eprintln!("[bypass relay] dropping engine");
+        drop(engine);
+        eprintln!("[bypass relay] complete");
     }
 
     async fn gateway_status(strategy: &str) -> Result<u16, String> {
@@ -379,11 +489,20 @@ mod tests {
 
     #[test]
     fn byedpi_accepts_every_preset_and_the_automatic_chain() {
+        if bounded_subprocess("byedpi_accepts_every_preset_and_the_automatic_chain") {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         for preset in presets() {
-            drop(Engine::start(preset.args).unwrap());
+            eprintln!("[bypass presets] starting {}", preset.id);
+            let engine = Engine::start(preset.args).unwrap();
+            eprintln!("[bypass presets] dropping {}", preset.id);
+            drop(engine);
         }
-        drop(Engine::start(&auto_strategy()).unwrap());
+        eprintln!("[bypass presets] starting Automatic");
+        let engine = Engine::start(&auto_strategy()).unwrap();
+        eprintln!("[bypass presets] dropping Automatic");
+        drop(engine);
         // byedpi has no `-T` on macOS; the chain must not offer one there.
         assert_eq!(
             auto_strategy().contains("-T "),
@@ -399,25 +518,48 @@ mod tests {
 
     #[test]
     fn restarts_and_refuses_a_second_engine() {
+        if bounded_subprocess("restarts_and_refuses_a_second_engine") {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        eprintln!("[bypass restart] starting first engine");
         let first = Engine::start("-d1").unwrap();
         assert!(matches!(Engine::start("-d1"), Err(Error::Busy)));
+        eprintln!("[bypass restart] dropping first engine");
         drop(first);
-        drop(Engine::start(&auto_strategy()).unwrap());
+        eprintln!("[bypass restart] starting second engine");
+        let second = Engine::start(&auto_strategy()).unwrap();
+        eprintln!("[bypass restart] dropping second engine");
+        drop(second);
+        eprintln!("[bypass restart] complete");
     }
 
     #[test]
     fn rejects_unknown_options() {
+        if bounded_subprocess("rejects_unknown_options") {
+            return;
+        }
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        eprintln!("[bypass invalid] native option rejection");
         assert!(matches!(
             Engine::start("--no-such-option"),
             Err(Error::InvalidStrategy)
         ));
+        eprintln!("[bypass invalid] pre-spawn interior-NUL rejection");
         assert!(matches!(
-            Engine::start("-s1\0"),
+            Engine::start("-s1\0-d1"),
             Err(Error::InvalidStrategy)
         ));
-        // A rejected strategy leaves the engine free.
-        drop(Engine::start(presets()[0].args).unwrap());
+        assert!(
+            !RUNNING.load(Ordering::Acquire),
+            "interior-NUL rejection before spawn releases the ownership claim"
+        );
+        // Both native initialization failure and CString's pre-spawn failure
+        // leave the engine free for a successful new run.
+        eprintln!("[bypass invalid] starting valid engine after failures");
+        let engine = Engine::start(presets()[0].args).unwrap();
+        eprintln!("[bypass invalid] dropping valid engine");
+        drop(engine);
+        eprintln!("[bypass invalid] complete");
     }
 }
