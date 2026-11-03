@@ -101,6 +101,6 @@ Plain `--workspace` includes `fastcord-fake`, whose dev-dependency turns `fastco
 
 ### OS-profile hint persistence
 `platform::network::profile` (Linux) owns bounded read-only NetworkManager identity observation and salted digest derivation; raw UUIDs stay in that module. `net::selector` imports only untrusted role preferences, exports generation/revision-scoped preferences, and requires ordinary fresh confirmations. `app::network_ui` skips identity I/O in fake mode, binds the digest to settings, and serializes preference saves with existing network edits. Other identity backends remain process-only.
-`platform::timezone` provides worker-only date-specific Unix civil-time conversion with DST ambiguity/gap rejection; scheduled_events validates form snapshots asynchronously and the account worker prepares the bounded display-offset cache before publication.
+`platform::timezone` provides worker-only date-specific Unix/Windows civil-time conversion with DST ambiguity/gap rejection; scheduled_events validates form snapshots asynchronously and the account worker prepares the bounded display-offset cache before publication.
 
 `platform::spellcheck` owns the optional Linux Enchant child lifetime, bounds and protocol; `app::composer::spelling` owns ephemeral selection/result serials. `app::onboarding::preview` owns visible custom emoji interests and cancellation. Event timezone refresh remains worker-only and account-owner scoped.
