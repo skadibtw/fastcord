@@ -1219,7 +1219,8 @@ mod community_list_tests {
         let steps = parse_script(
             include_str!("../../../fixtures/ui/community-lists.script"),
             std::path::Path::new("."),
-        );
+        )
+        .unwrap();
         let panels: Vec<_> = steps
             .iter()
             .filter_map(|(_, step)| match step {
