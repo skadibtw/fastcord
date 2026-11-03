@@ -1347,3 +1347,5 @@ Fake controls `event-edit`, `event-weekly`, `event-once` and `event-keep-repeat`
 The recurrence-edit fixture runs in an exact-test child process because it deliberately consumes the global worker-published timezone cache. Concurrent account-startup tests cannot replace its offsets; native offset and editor assertions remain intact.
 
 The existing past-start edit fixture also runs in its own exact-test child process for the same shared-cache reason (#254); it retains completed-event rejection and unchanged past-start save assertions.
+
+Linux packet-session admission (#226) has offline real-IPC/FD tests in `fastcord-platform::network::linux_session`, plus the guarded namespace/NFQUEUE executable path documented in NETWORK_TESTING.md. These establish ownership, bounded lease lifetime and source-port cleanup sequencing; they do not enable or validate a shipping Linux packet-recovery helper.

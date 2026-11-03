@@ -133,3 +133,7 @@ mod packet_capability_tests {
 }
 #[cfg(target_os = "linux")]
 pub mod profile;
+
+/// Admission and lifetime primitives only; no shipping Linux packet backend.
+#[cfg(target_os = "linux")]
+pub mod linux_session;

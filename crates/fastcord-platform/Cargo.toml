@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Exposes the Win32 helper window that hardware capture tests of dependent
-# crates paint known pixels with (never enabled in a normal build).
+# Exposes native capture fixtures and the guarded Linux packet-session example
+# (never enabled in a normal build).
 test-support = []
 
 [dependencies]
@@ -115,3 +115,7 @@ workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[[example]]
+name = "linux_packet_session"
+required-features = ["test-support"]

@@ -79,6 +79,7 @@
 ### Added
 - Deterministic App regression for repeated manual reconnect during blocked voice-volume persistence: the latest mute survives stale disk snapshots, coalesced dragging, flush and writer/account status changes (#233).
 - Filter the loaded public-server discovery pages by name or description with bounded Unicode text; filtering also releases unused icon interests and never fetches another page automatically. Global discovery search and direct discovery joins remain unavailable (#90).
+- Add Linux packet-session admission and lifetime primitives with kernel-authenticated Unix IPC, bounded socket-FD leases and a guarded real NFQUEUE namespace fixture. The shipping Linux helper remains unsupported pending the privileged launcher, packet engine and native readiness gates (#226).
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).
