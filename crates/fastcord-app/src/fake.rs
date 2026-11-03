@@ -1174,7 +1174,8 @@ mod dm_sort_tests {
         let steps = parse_script(
             include_str!("../../../fixtures/ui/dm-sort.script"),
             std::path::Path::new("."),
-        );
+        )
+        .unwrap();
         let modes: Vec<_> = steps
             .iter()
             .filter_map(|(_, step)| match step {
@@ -1202,7 +1203,11 @@ mod dm_sort_tests {
             s,
             Step::Open(_) | Step::DmSort(_) | Step::Snap(..) | Step::Quit
         )));
-        assert!(parse_script("sort-dms unknown", std::path::Path::new(".")).is_empty());
+        assert!(
+            parse_script("sort-dms unknown", std::path::Path::new("."))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -1214,7 +1219,8 @@ mod community_list_tests {
         let steps = parse_script(
             include_str!("../../../fixtures/ui/community-lists.script"),
             std::path::Path::new("."),
-        );
+        )
+        .unwrap();
         let panels: Vec<_> = steps
             .iter()
             .filter_map(|(_, step)| match step {
@@ -1243,6 +1249,64 @@ mod community_list_tests {
         assert!(steps.iter().all(|(_, step)| matches!(
             step,
             Step::Open(_) | Step::Size(..) | Step::Toggle(_) | Step::Snap(..) | Step::Quit
+        )));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_nickname_tests {
+    use super::*;
+
+    #[test]
+    fn native_sidebar_nickname_script_uses_real_text_channels_and_read_only_steps() {
+        let world: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/fake/world.json")).unwrap();
+        let steps = parse_script(
+            include_str!("../../../fixtures/ui/sidebar-nickname.script"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let links: Vec<_> = steps
+            .iter()
+            .filter_map(|(_, step)| match step {
+                Step::Open(link) => Some(link.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                "discord://-/channels/5001/6005",
+                "discord://-/channels/5002/6101",
+                "discord://-/channels/@me/8003",
+                "discord://-/channels/5001/6005"
+            ]
+        );
+        for (guild, channel) in [("5001", "6005"), ("5002", "6101")] {
+            let guild = world["guilds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["id"] == guild)
+                .unwrap();
+            assert!(
+                guild["channels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|c| c["id"] == channel && c["type"] == 0)
+            );
+        }
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|(_, s)| matches!(s, Step::Snap(..)))
+                .count(),
+            4
+        );
+        assert!(steps.iter().all(|(_, s)| matches!(
+            s,
+            Step::Open(_) | Step::Size(..) | Step::Snap(..) | Step::Quit
         )));
     }
 }
