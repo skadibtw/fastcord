@@ -358,9 +358,14 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Показаны первые {} серверов.",
     ),
     ("Explore public servers", "Обзор серверов"),
+    ("Filter loaded servers", "Фильтр загруженных серверов"),
     (
-        "To join a server, open an invite link to it. Searching the list is not available.",
-        "Чтобы вступить на сервер, откройте ссылку-приглашение. Поиск по списку недоступен.",
+        "No loaded servers match this filter.",
+        "Среди загруженных серверов совпадений нет.",
+    ),
+    (
+        "Filter only the servers loaded here. Show more loads another page. To join, open an invite link.",
+        "Фильтр ищет только среди загруженных серверов. «Показать ещё» загрузит следующую страницу. Для вступления откройте приглашение.",
     ),
     ("Profile", "Профиль"),
     ("Roles…", "Роли…"),
