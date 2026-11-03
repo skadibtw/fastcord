@@ -25,6 +25,8 @@
 
 - Isolate scheduled-event cache fixtures from parallel account resets without changing runtime timezone behavior (#254).
 - Allow explicit whole-series recurrence changes when editing an event: keep the current rule, stop repetition, or choose weekly/every-other-week UTC; preserve unknown rules by default and keep writes gated (#92).
+- Make the onboarding checklist regression force actual scrolling before checking scrollbar clearance, so platform font metrics cannot invalidate its fixture; production layout and click/disabled checks are unchanged (#252).
+- Let Community onboarding role and channel checklists use the available form width and reserve space for their scrollbars, keeping labels such as Moderator readable while long names wrap (#252).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.

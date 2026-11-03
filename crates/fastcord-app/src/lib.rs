@@ -1871,7 +1871,7 @@ impl App {
                     "event-keep-repeat" => Message::Events(scheduled_events::Event::Repeat(
                         fastcord_discord::EventRecurrenceChange::Keep,
                     )),
-                    "community-setup" => {
+                    "community-setup" | "community-list-open" => {
                         let Some(guild) = self
                             .phase
                             .gateway()
@@ -1881,15 +1881,15 @@ impl App {
                         };
                         Message::Community(community::Event::Open(guild))
                     }
-                    "community-onboarding" => {
+                    "community-onboarding" | "community-list-onboarding" => {
                         Message::Community(community::Event::Tab(community::Tab::Onboarding))
                     }
-                    "community-question" => Message::Community(community::Event::Onboarding(
-                        community::OnbMsg::SelectPrompt(0),
-                    )),
-                    "community-answer" => Message::Community(community::Event::Onboarding(
-                        community::OnbMsg::SelectOption(0),
-                    )),
+                    "community-question" | "community-list-question" => Message::Community(
+                        community::Event::Onboarding(community::OnbMsg::SelectPrompt(0)),
+                    ),
+                    "community-answer" | "community-list-answer" => Message::Community(
+                        community::Event::Onboarding(community::OnbMsg::SelectOption(0)),
+                    ),
                     "community-custom" | "community-clear" => {
                         let Some(event) = self
                             .ui
@@ -1901,6 +1901,12 @@ impl App {
                         Message::Community(event)
                     }
                     "community-discard" => Message::Community(community::Event::Discard),
+                    "community-list-end" => {
+                        return iced::widget::operation::snap_to(
+                            iced::widget::Id::new("community-content"),
+                            iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                        );
+                    }
                     "community-emoji-scroll" => {
                         return iced::widget::operation::scroll_to(
                             iced::widget::Id::new("community-content"),
