@@ -1409,3 +1409,8 @@ click the sidebar identity and verify the account menu still says **Fake Me**
 and **@fake_me**, and the existing Edit profile action remains available. The
 script performs no nickname/settings write; normal history/read operations may
 occur. This proves local rendering only, not live nickname-route interoperability.
+
+### Held entity component selectors (#100 follow-up)
+
+- Offline: model `entity_tests` and `component_owner_updates_*` validate bounded typed defaults/filter metadata and partial ownership updates. Reducer `component_entities_*` checks current accounts, hidden channels and unjoined private threads. App `entity_select_*` / `entity_draft_*` / `entity_query_*` tests cover local drafts, stale controls/accounts/applications and the existing one-shot interaction ledger. No test contacts Discord.
+- Native fake scenario: generate an isolated world with `python3 fixtures/fake/issue100-entities/generate.py <scratch>/world.json`, copy `entity-controls.script` beside it, and run the debug fake server with that world and a request log. Run debug fake-feature `fastcord --fake-discord <port> --script <scratch>/entity-controls.script` with isolated application data. Inspect the seven images: controls, unavailable default, role selection, local user filter, mentionable selection, filtered channels, explicit-submit refusal. Only the final Submit should cause one `/interactions` POST; the local fake refuses it with its existing 404 and no retry. Opening/filtering/choosing must add no remote searches or member fetches. Script dispatches the same scoped intents as widgets; iced tests click the actual controls independently. This scenario is not live Discord interoperability evidence.

@@ -435,7 +435,8 @@ impl App {
                                 .controls
                                 .timeline_intent(history::Intent::Retry(channel_id));
                         }
-                        action @ (timeline::Event::Edit { .. }
+                        action @ (timeline::Event::EntitySelect(_)
+                        | timeline::Event::Edit { .. }
                         | timeline::Event::Reply { .. }
                         | timeline::Event::Delete { .. }
                         | timeline::Event::ConfirmDelete { .. }

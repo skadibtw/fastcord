@@ -880,6 +880,29 @@ mod tests {
     }
 
     #[test]
+    fn entity_component_values_use_the_existing_typed_component_request_shape() {
+        for kind in 5..=8 {
+            for values in [Vec::new(), vec!["101".to_owned(), "202".to_owned()]] {
+                let request = InteractionRequest::component(
+                    &context(nonce()),
+                    Snowflake(900),
+                    Snowflake(700),
+                    0,
+                    kind,
+                    "entities",
+                    &values,
+                );
+                let sent = serde_json::to_value(request).unwrap();
+                assert_eq!(sent["type"], 3);
+                assert_eq!(
+                    sent["data"],
+                    json!({"component_type":kind,"custom_id":"entities","values":values})
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_button_press_names_the_message_and_a_select_adds_its_values() {
         let nonce = nonce();
         let press = InteractionRequest::component(

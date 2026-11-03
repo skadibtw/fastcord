@@ -2850,7 +2850,9 @@ impl Worker {
                 message,
                 answer,
             } => history.poll_voters(&self.rest, channel, message, answer),
-            Command::Interact(action) => history.interact(&self.rest, *action),
+            Command::Interact(action) => {
+                history.interact_held(&self.rest, *action, Some(&self.tracker.store))
+            }
             Command::Typing(channel) => {
                 let now = self.tracker.clock.now();
                 if history.can_send_in(channel) && self.typing_send.permit(now, channel) {
@@ -3560,6 +3562,16 @@ impl Worker {
         timeline.names = mention_names(&self.tracker.store, navigation.selected_guild, &timeline);
         timeline.candidates =
             mention_candidates(&self.tracker.store, navigation.selected_guild, &timeline);
+        if timeline.rows.iter().any(|row| {
+            (0..fastcord_model::MAX_COMPONENTS).any(|index| {
+                crate::component_view::select_at(&row.message.components, index)
+                    .is_some_and(|select| (5..=8).contains(&select.kind))
+            })
+        }) && let (Some(account), Some(channel)) = (store.current_user(), timeline.channel_id)
+        {
+            timeline.entity_candidates =
+                store.component_entities(account.id, navigation.selected_guild, channel);
+        }
         let emoji = emoji_picker::snapshot(&request.emoji, &self.tracker.store, &navigation);
         let parent = *self.bridge.voice_requests.borrow();
         let offers = parent
@@ -3894,6 +3906,7 @@ pub struct PrivateConversationUi {
 pub struct GatewayPanel {
     /// One fixed-size local string-select draft, dropped with the account.
     pub component_choices: Option<crate::component_view::Choices>,
+    pub entity_select: Option<crate::entity_select::State>,
     pub id: u64,
     pub status: GatewayStatus,
     pub navigation: Arc<NavigationSnapshot>,
@@ -4151,6 +4164,7 @@ impl GatewayPanel {
             id,
             status: GatewayStatus::Connecting { attempt: 0 },
             component_choices: None,
+            entity_select: None,
             navigation: Arc::default(),
             timeline: Arc::default(),
             controls,
@@ -4249,6 +4263,14 @@ impl GatewayPanel {
         );
         self.call_view.prune(&crate::call_layout::ids(&tiles));
         self.composer.select(self.timeline.channel_id);
+        crate::entity_select::State::reconcile(
+            &mut self.entity_select,
+            self.navigation
+                .current_user
+                .as_ref()
+                .map(|user| (user.id, self.id, self.timeline.interaction_session)),
+            &self.timeline,
+        );
 
         if self
             .confirm_delete
@@ -4335,6 +4357,11 @@ impl GatewayPanel {
     pub fn interaction(&self) -> timeline::Interaction {
         timeline::Interaction {
             component_choices: self.component_choices,
+            entity_owner: self
+                .navigation
+                .current_user
+                .as_ref()
+                .map(|user| (user.id, self.id, self.timeline.interaction_session)),
             editing: self.composer.editing(),
             replying: self.composer.replying(),
             confirming: self
@@ -4369,6 +4396,27 @@ impl GatewayPanel {
             self.more = None;
         }
         let queued = match event {
+            Event::EntitySelect(event) => {
+                let Some(action) = crate::entity_select::State::update(
+                    &mut self.entity_select,
+                    event,
+                    self.navigation
+                        .current_user
+                        .as_ref()
+                        .map(|user| (user.id, self.id, self.timeline.interaction_session)),
+                    self.navigation.selected_guild,
+                    &self.timeline,
+                ) else {
+                    return false;
+                };
+                let queued = self.controls.interact(action);
+                if queued {
+                    self.entity_select = None;
+                } else if let Some(state) = &mut self.entity_select {
+                    state.refused(self.controls.stopped());
+                }
+                queued
+            }
             Event::SelectChoice { key, option } if open == Some(key.channel) => {
                 if let Some(row) = self
                     .timeline
@@ -5474,7 +5522,12 @@ mod bridge_tests {
         let mut ui = crate::variable_list::harness::Ui::new(
             400.0,
             400.0,
-            crate::component_view::view(&panel.timeline.rows[0], channel, panel.component_choices),
+            crate::component_view::view(
+                &panel.timeline.rows[0],
+                channel,
+                panel.component_choices,
+                None,
+            ),
         );
         ui.redraw();
         ui.draw();
@@ -5510,6 +5563,43 @@ mod bridge_tests {
         });
         panel.consume();
         assert!(panel.component_choices.is_none());
+    }
+
+    #[test]
+    fn entity_select_queue_refusal_keeps_the_draft_and_visible_error() {
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        Arc::make_mut(&mut panel.navigation).current_user = Some(
+            serde_json::from_value(serde_json::json!({"id":"42","username":"fixture"})).unwrap(),
+        );
+        let row = &mut Arc::make_mut(&mut panel.timeline).rows[0];
+        let message = Arc::make_mut(&mut row.message);
+        message.author.bot = true;
+        message.components = fastcord_model::parse_components(&[
+            serde_json::json!({"type":6,"custom_id":"role","min_values":0}),
+        ]);
+        let target = crate::entity_select::Target::for_row(row, (Snowflake(42), panel.id, 0), 0);
+        panel.message_action(timeline::Event::EntitySelect(
+            crate::entity_select::Event::Open(target),
+        ));
+        assert!(panel.entity_select.is_some());
+        for _ in 0..COMMAND_QUEUE {
+            assert!(bridge.interact(crate::interactions::Action::CloseModal));
+        }
+        panel.message_action(timeline::Event::EntitySelect(
+            crate::entity_select::Event::Submit(target),
+        ));
+        assert!(panel.entity_select.as_ref().unwrap().notice().is_some());
+        while commands.try_recv().is_ok() {}
+        panel.message_action(timeline::Event::EntitySelect(
+            crate::entity_select::Event::Submit(target),
+        ));
+        assert!(panel.entity_select.is_none());
+        assert!(
+            matches!(commands.try_recv(),Ok(Command::Interact(action)) if matches!(*action,crate::interactions::Action::EntityComponent{..}))
+        );
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

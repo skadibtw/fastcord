@@ -1,0 +1,27 @@
+size 1080 720
+wait 2
+open discord://-/channels/5001/6005
+wait 2
+snap entity-controls
+entity open 1549999999999999999 1
+snap entity-unavailable-default
+entity clear
+entity toggle role 7003
+snap entity-role-selected
+entity close
+entity open 1549999999999999999 0
+entity query A
+snap entity-local-user-filter
+entity close
+entity open 1549999999999999999 2
+entity toggle role 7003
+entity toggle user 1001
+snap entity-mentionable
+entity close
+entity open 1549999999999999999 3
+entity toggle channel 6005
+snap entity-channel-filter
+entity submit
+wait 1
+snap entity-submit-refusal
+quit

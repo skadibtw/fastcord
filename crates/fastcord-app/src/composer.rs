@@ -2081,6 +2081,8 @@ mod tests {
                 message_snapshots: Vec::new(),
                 poll: None,
                 components: Vec::new(),
+                application_id: None,
+                webhook_id: None,
                 mentions: Vec::new(),
                 mention_roles: Vec::new(),
                 mention_everyone: false,

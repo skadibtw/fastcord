@@ -179,6 +179,8 @@ pub fn edit_response_update(held: Option<&Message>, answer: Message) -> Option<M
         return None;
     }
     Some(MessageUpdate {
+        application_id: None,
+        webhook_id: None,
         id: answer.id,
         channel_id: answer.channel_id,
         content: Some(answer.content),

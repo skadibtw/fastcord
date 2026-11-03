@@ -399,6 +399,16 @@ impl App {
             // Forms open as dialogs over the window; only their reminder
             // lines and notices stay above the conversation.
             let mut dialogs: Vec<(Element<'_, Message>, Option<Message>)> = Vec::new();
+            if let Some(picker) = &gateway.entity_select {
+                dialogs.push((
+                    picker
+                        .view(&gateway.timeline)
+                        .map(|event| Message::Timeline(timeline::Event::EntitySelect(event))),
+                    Some(Message::Timeline(timeline::Event::EntitySelect(
+                        crate::entity_select::Event::Close(picker.target),
+                    ))),
+                ));
+            }
             if let Some(panel) =
                 onboarding::view(&self.ui.onboarding, &gateway.navigation, &gateway.revealed)
             {
