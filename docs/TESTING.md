@@ -1110,6 +1110,24 @@ Only the groups listed under "On by default" in PROTOCOL.md "Write allowlist" se
 - [ ] Alt account, Windows: join channels set to 64 and 96 kbit/s (and a boosted one if available) with the audio dialog open: "Sending your voice at N kbps" follows the channel. Change the joined channel's bitrate in the official client: the line changes without an audio gap. The voice sounds right in the official client.
 
 ### Blocking bypass (byedpi, SPEC 5.4)
+
+- **Delayed-start shutdown (#259):** `readiness_timeout_joins_delayed_native_start_after_failed_wake`
+  runs the real `Engine::start` readiness timeout in an isolated child. A channel
+  gate prevents native entry until shutdown has set cancellation and attempted
+  its first loopback wake (which cannot connect before the listener exists).
+  The child must return `NotReady`, join the canceled worker and start/stop a
+  fresh engine. The parent kills and reaps only that child if it exceeds 30 s;
+  it never detaches an engine or holds the shared engine-test lock. The four
+  existing ordinary relay, presets, restart and invalid-strategy tests use the
+  same exact-test subprocess watchdog. All their assertions and repeated starts
+  still execute within each child; stderr phase markers distinguish startup,
+  CONNECT, echo I/O, echo-thread join and engine drop. Run the full
+  `cargo test -p fastcord-bypass --locked` suite for all scenarios. Windows and macOS CI must exercise their actual
+  native shims; Linux success is not cross-platform runtime evidence.
+- The original pinned-source delayed-entry probe reproduced a lost stop: worker
+  entry cleared cancellation after an unsuccessful shutdown wake, and another
+  connection alone could not stop it. This is consistent with a Windows CI
+  stall but does not establish which test or interleaving caused that run.
 - **Retired from the app (2026-10-25):** the setting was removed together with the app's `fastcord-bypass` dependency, because it had started nothing since the transport moved to `fastcord-net` (AGENTS.md, #214, #218). The crate, its engine and the checks below stay in the workspace for a possible re-enable as an explicit transport; the manual results record the integration that existed while the app still linked it.
 - **Automated:** `fastcord-bypass` `tests::relays_a_connection_through_connect` (a real engine running the Automatic chain relays bytes to a loopback server through HTTP CONNECT), `byedpi_accepts_every_preset_and_the_automatic_chain` (and preset ids stay distinct), `restarts_and_refuses_a_second_engine` (stop, restart with the compiled-in defaults, one engine per process), `rejects_unknown_options` (byedpi's own refusal and a NUL byte end the start, leaving the engine free). `live_discord_api_through_engine` is ignored: run it with `cargo test -p fastcord-bypass -- --ignored --nocapture` on a filtered network; it prints each preset's result and asserts Automatic, with `FASTCORD_BYPASS_OPTIONS` prepended (for example `-I <address>` behind a VPN TUN).
 - **Windows, 2026-10-25, maintainer's filtered ISP route, no account used:** the machine runs Throne (sing-box TUN); its process exclusion re-dials connections from ThroneCore, which erased every split and TTL (TTL 1 still reached ya.ru), so the checks bound byedpi to the physical address with `-I 192.168.1.114`. Then TTL 1-3 died as expected. Without desync, `discord.com/api/v9/gateway`, `gateway.discord.gg`, `cdn.discordapp.com`, `media.discordapp.net`, `discordapp.com` and `latency.discord.media` timed out after the ClientHello; with `-s1 -r1+s` or `-d1` each answered (200/404/403/401/520 from the services), as did `-o1`, `-q1`, `-d1+s` and fake strategies (`-f-1 -t3`, `-d1 -f-1 -t5`). The ignored live test failed (timeout) with `-I 192.168.1.114` alone and passed with `-I 192.168.1.114 -s1 -r1+s` (reqwest through CONNECT). In the debug `fastcord.exe`, "Show QR code" failed ("Could not connect to Discord's QR login service") with the bypass off and showed a QR code with it on (`-I 192.168.1.114 -s1 -r1+s`, enabled in the new settings section, which read "Restart fastcord to apply" until relaunched); the connection belonged to `fastcord.exe` from the physical address. With the presets and Automatic (same day, options `-I 192.168.1.114`): every preset returned 200 for the Gateway URL, Automatic returned 200 in 2.25 s (the direct group's 2 s timeout, then the first preset), and `fastcord.exe` set to Automatic with that option under Advanced showed the QR code.
