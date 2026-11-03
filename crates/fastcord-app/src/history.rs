@@ -1628,6 +1628,12 @@ impl History {
         }));
     }
 
+    #[cfg(test)]
+    pub(crate) fn notification_ack_fixture(&self) -> Option<(Snowflake, Snowflake, bool)> {
+        self.ack_inflight
+            .map(|ack| (ack.channel, ack.message, ack.manual))
+    }
+
     /// The user marked a conversation read. `message` is its newest.
     pub fn mark_read(&mut self, rest: &RestClient, channel: Snowflake, message: Snowflake) {
         self.want_ack(rest, channel, message, true);

@@ -3540,3 +3540,73 @@ fn private_sort_large_pages_and_keyboard_share_exact_order_without_changing_sele
     assert_eq!(store.bytes(), bytes);
     assert_eq!(store.bytes(), store.recount());
 }
+
+#[test]
+fn notification_read_target_rechecks_account_permissions_and_channel_lifetime() {
+    let raw = json!({"user":{"id":"1","username":"me"}, "session_id":"notify", "resume_gateway_url":"wss://gateway.discord.gg",
+        "guilds":[{"id":"100","name":"QA","owner_id":"2","roles":[{"id":"100","name":"everyone","permissions":"66560"}],
+        "members":[{"user":{"id":"1","username":"me"},"roles":[]}],
+        "channels":[{"id":"200","type":0,"name":"text","last_message_id":"300"}]}],
+        "private_channels":[{"id":"400","type":1,"last_message_id":"500","recipients":[{"id":"2","username":"peer"}]}]});
+    let (mut store, _) = setup(&raw.to_string());
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(100)), id(200)),
+        Some(id(300))
+    );
+    assert_eq!(
+        store.notification_read_target(id(2), Some(id(100)), id(200)),
+        None
+    );
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(101)), id(200)),
+        None
+    );
+    assert_eq!(
+        store.notification_read_target(id(1), None, id(400)),
+        Some(id(500))
+    );
+    apply(&mut store, "CHANNEL_UPDATE", &json!({"id":"200","guild_id":"100","type":0,"permission_overwrites":[{"id":"100","type":0,"allow":"0","deny":"1024"}]}).to_string());
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(100)), id(200)),
+        None
+    );
+    apply(
+        &mut store,
+        "CHANNEL_UPDATE",
+        &json!({"id":"400","type":1,"is_message_request":true}).to_string(),
+    );
+    assert_eq!(store.notification_read_target(id(1), None, id(400)), None);
+    apply(&mut store, "CHANNEL_DELETE", r#"{"id":"400","type":1}"#);
+    assert_eq!(store.notification_read_target(id(1), None, id(400)), None);
+}
+
+#[test]
+fn notification_read_target_requires_history_and_current_private_thread_membership() {
+    let threads = [thread_json(
+        23,
+        12,
+        10,
+        json!({"member":{"user_id":"1"}, "last_message_id":"300"}),
+    )];
+    let (mut store, _) = thread_store(ACCESS, &threads);
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(100)), id(23)),
+        Some(id(300))
+    );
+    apply(
+        &mut store,
+        "THREAD_MEMBERS_UPDATE",
+        r#"{"id":"23","guild_id":"100","member_count":0,"removed_member_ids":["1"]}"#,
+    );
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(100)), id(23)),
+        None
+    );
+    let (mut store, _) = thread_store(ACCESS, &threads);
+    apply(&mut store, "CHANNEL_UPDATE", &json!({"id":"10","guild_id":"100","type":0,"permission_overwrites":[{"id":"100","type":0,"allow":"0","deny":"65536"}]}).to_string());
+    assert_eq!(
+        store.notification_read_target(id(1), Some(id(100)), id(23)),
+        None,
+        "view alone does not authorize reading history"
+    );
+}
