@@ -470,7 +470,18 @@
      "rate_limit_per_user": 0
     }
    ],
-   "emojis": [],
+   "emojis": [
+    {
+     "id": "900",
+     "name": "stone",
+     "animated": false
+    },
+    {
+     "id": "901",
+     "name": "wave",
+     "animated": true
+    }
+   ],
    "stickers": [],
    "stage_instances": [],
    "members": [

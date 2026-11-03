@@ -685,7 +685,8 @@ Implemented in `fastcord-discord::community_admin` (editable documents that pres
 - One save per tab, re-checked against current permissions just before sending; dirty indicator and Discard; one write in flight; stale answers ignored by a serial; 401 stops the account.
 - The editor reloads from the answer (or the next read); Community changes show only after `GUILD_UPDATE`.
 - Disabling Community needs a Confirm. Enabling needs a rules and an updates channel.
-- **Left:** analytics and monetization dashboards, custom emoji, non-TERMS questions.
+- **Onboarding emoji.** Each answer offers Unicode input, explicit Clear and a same-guild custom selector over the reducer’s bounded 500-emoji read model. Search retains at most 64 Unicode characters; at most 24 text choices are rendered per page, with an animated marker and IDs only for duplicate/unknown names or unavailable fallback. Selection and Save recheck current guild ownership/metadata, existing reducer emoji usability (availability and role restrictions) and Manage Server; unchanged baseline emoji remain intact even if unavailable. Controls carry account/panel generation and stable question/answer IDs. The read-model interest follows the visible settings page and is released on tab/close or an overriding settings/call screen. This text-only selector adds no image workers; custom previews in this administrator editor remain a visual follow-up.
+- **Left:** analytics and monetization dashboards, custom emoji selection in the server guide, non-TERMS questions.
 
 ### 8.22 Server emoji, stickers and soundboard assets (#99)
 

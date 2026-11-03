@@ -91,7 +91,7 @@ impl fmt::Display for CommunityError {
             Self::EmptyTitle => f.write_str("Every question, answer and entry needs a title."),
             Self::TitleTooLong => f.write_str("A title or description is too long."),
             Self::EmptyPrompt => f.write_str("Every question needs at least one answer."),
-            Self::BadEmoji => f.write_str("Use a Unicode emoji (custom emoji are kept, not added)."),
+            Self::BadEmoji => f.write_str("Enter a Unicode emoji in this field."),
             Self::UnknownRole(_) => f.write_str("A chosen role no longer exists."),
             Self::UnassignableRole(_) => f.write_str(
                 "A chosen role is one you cannot give: it is above your highest role, managed, or @everyone.",
@@ -181,8 +181,8 @@ pub fn fresh_id(now_ms: u64, sequence: u64) -> Snowflake {
     Snowflake((now_ms.saturating_sub(DISCORD_EPOCH_MS) << 22) | (sequence & 0x3F_FFFF))
 }
 
-/// A Unicode emoji only: custom emoji (with an id) are kept as they are but
-/// never added.
+/// An optional Unicode or custom emoji. Editors validate ownership of newly
+/// selected custom emoji against their current guild assets before saving.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Emoji {
     None,
@@ -271,7 +271,15 @@ impl Emoji {
             let emoji = if matches!(self, Self::None) {
                 Value::Null
             } else {
-                json!({ "id": id, "name": name, "animated": animated })
+                let mut emoji = out
+                    .get("emoji")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                emoji.insert("id".into(), id.clone());
+                emoji.insert("name".into(), name.clone());
+                emoji.insert("animated".into(), animated.into());
+                emoji.into()
             };
             out.insert("emoji".into(), emoji);
         }
@@ -444,6 +452,20 @@ impl OptionDoc {
 
     fn read(value: &Value) -> Option<Self> {
         let map = value.as_object()?;
+        let mut raw = rest_of(
+            map,
+            &["id", "title", "description", "role_ids", "channel_ids"],
+        );
+        if let Some(emoji) = map.get("emoji").and_then(Value::as_object) {
+            let extra: Map<String, Value> = emoji
+                .iter()
+                .filter(|(key, _)| !["id", "name", "animated"].contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !extra.is_empty() {
+                raw.insert("emoji".into(), extra.into());
+            }
+        }
         Some(Self {
             id: serde_json::from_value(map.get("id")?.clone()).ok()?,
             title: text(map, "title", MAX_TEXT_BYTES),
@@ -451,10 +473,7 @@ impl OptionDoc {
             emoji: Emoji::read(map),
             role_ids: id_list(map.get("role_ids"))?,
             channel_ids: id_list(map.get("channel_ids"))?,
-            raw: rest_of(
-                map,
-                &["id", "title", "description", "role_ids", "channel_ids"],
-            ),
+            raw,
         })
     }
 
@@ -1379,5 +1398,50 @@ mod tests {
         assert!(Emoji::Unicode("a".into()).check().is_err());
         assert!(Emoji::Unicode(":smile:".into()).check().is_err());
         assert_eq!(custom.text(), "");
+    }
+    #[test]
+    fn custom_emoji_edits_preserve_unknown_fields_and_clear_explicitly() {
+        let mut raw: Value = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/rest/onboarding-synthetic.json"
+        ))
+        .unwrap();
+        raw["future_document"] = json!({"enabled": true});
+        raw["prompts"][0]["future_prompt"] = json!(17);
+        raw["prompts"][0]["options"][1]["future_option"] = json!([1, 2]);
+        raw["prompts"][0]["options"][1]["emoji"]["animated"] = json!(true);
+        raw["prompts"][0]["options"][1]["emoji"]["future_emoji"] = json!({"value": 42});
+        let baseline = OnboardingDoc::from_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let mut doc = baseline.clone();
+        doc.prompts[0].options[0].title = "Edited other answer".into();
+        let world = World::new();
+        let body = doc.body(&baseline, &world.known()).unwrap();
+        assert_eq!(body["future_document"], raw["future_document"]);
+        assert_eq!(body["prompts"][0]["future_prompt"], 17);
+        let old = &body["prompts"][0]["options"][1];
+        assert_eq!(old["emoji"]["future_emoji"]["value"], 42);
+        assert_eq!(old["future_option"], json!([1, 2]));
+        assert_eq!(old["emoji_id"], "900");
+        assert_eq!(old["emoji_name"], "stone");
+        assert_eq!(old["emoji_animated"], true);
+        doc.prompts[0].options[0].emoji = Emoji::Custom {
+            id: Snowflake(901),
+            name: "wave".into(),
+            animated: true,
+        };
+        let body = doc.body(&baseline, &world.known()).unwrap();
+        assert_eq!(
+            body["prompts"][0]["options"][0]["emoji"],
+            json!({"id":"901", "name":"wave", "animated":true})
+        );
+        doc.prompts[0].options[1].emoji = Emoji::None;
+        let body = doc.body(&baseline, &world.known()).unwrap();
+        let cleared = &body["prompts"][0]["options"][1];
+        assert!(
+            cleared["emoji"].is_null()
+                && cleared["emoji_id"].is_null()
+                && cleared["emoji_name"].is_null()
+        );
+        assert_eq!(cleared["emoji_animated"], false);
+        assert_eq!(cleared["future_option"], json!([1, 2]));
     }
 }

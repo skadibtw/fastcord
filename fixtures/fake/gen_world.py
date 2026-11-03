@@ -344,7 +344,9 @@ messages[C3_WELCOME] = chatter(C3_WELCOME, [p["id"] for p in people[:3]], 4, 710
 guilds = [
     guild(G1, "Fake Admin Lab", ME, ["COMMUNITY", "NEWS"], "A synthetic server you own.",
           roles1, channels1, members1, rules_channel_id=C_RULES, system_channel_id=C_GENERAL,
-          public_updates_channel_id=C_NEWS, member_count=30),
+          public_updates_channel_id=C_NEWS, member_count=30,
+          emojis=[{"id": "900", "name": "stone", "animated": False},
+                  {"id": "901", "name": "wave", "animated": True}]),
     guild(G2, "Fake Member Club", people[0]["id"], [], "A server where you are an ordinary member.",
           roles2, channels2, members2, member_count=12),
     guild(G3, "Fake Rules Gate", people[1]["id"], ["COMMUNITY", "MEMBER_VERIFICATION_GATE_ENABLED"],

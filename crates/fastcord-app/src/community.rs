@@ -14,15 +14,17 @@
 //! brings. Discord's validation messages are shown as it wrote them.
 
 use crate::ui::{button, primary_button};
-use fastcord_discord::state::navigation::{AdminKind, GuildAdmin, NavigationSnapshot};
+use fastcord_discord::state::navigation::{
+    AdminKind, AssetEmoji, GuildAdmin, GuildAssets, MAX_ASSET_EMOJI, NavigationSnapshot,
+};
 use fastcord_discord::{
     CommunityError, CommunityRequestError, GuideDoc, GuideEntry, Known,
     MAX_ENTRY_DESCRIPTION_CHARS, MAX_ENTRY_TITLE_CHARS, MAX_NEW_MEMBER_ACTIONS,
     MAX_OPTION_DESCRIPTION_CHARS, MAX_OPTION_TITLE_CHARS, MAX_OPTIONS_EDITED,
     MAX_PROMPT_TITLE_CHARS, MAX_PROMPTS_EDITED, MAX_RESOURCE_CHANNELS, MAX_RULE_CHARS,
     MAX_RULES_DESCRIPTION_CHARS, MAX_RULES_EDITED, MAX_WELCOME_CHARS, ONBOARDING_MODES,
-    OnboardingDoc, OptionDoc, PromptDoc, RestClient, RestError, RulesEdit, Screening,
-    VERIFICATION_LEVELS, disable_community_body, enable_community_body, fresh_id,
+    OnboardingDoc, OnboardingEmoji, OptionDoc, PromptDoc, RestClient, RestError, RulesEdit,
+    Screening, VERIFICATION_LEVELS, disable_community_body, enable_community_body, fresh_id,
 };
 use fastcord_model::Snowflake;
 use iced::widget::{
@@ -62,6 +64,15 @@ pub enum RulesMsg {
     Remove(usize),
 }
 
+/// Identity of the answer that rendered an emoji control. Never an array index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmojiTarget {
+    serial: u64,
+    guild: Snowflake,
+    prompt: Snowflake,
+    option: Snowflake,
+}
+
 #[derive(Clone, Debug)]
 pub enum OnbMsg {
     Enabled(bool),
@@ -80,7 +91,11 @@ pub enum OnbMsg {
     SelectOption(usize),
     OptionTitle(String),
     OptionDescription(String),
-    OptionEmoji(String),
+    OptionEmoji(EmojiTarget, String),
+    OptionCustom(EmojiTarget, Snowflake),
+    ClearEmoji(EmojiTarget),
+    EmojiQuery(EmojiTarget, String),
+    EmojiPage(EmojiTarget, bool),
     ToggleRole(Snowflake),
     ToggleChannel(Snowflake),
 }
@@ -171,6 +186,8 @@ struct OnbEd {
     doc: OnboardingDoc,
     prompt: Option<usize>,
     option: Option<usize>,
+    emoji_query: String,
+    emoji_page: usize,
 }
 
 impl OnbEd {
@@ -180,6 +197,8 @@ impl OnbEd {
             doc,
             prompt: None,
             option: None,
+            emoji_query: String::new(),
+            emoji_page: 0,
         }
     }
 
@@ -190,6 +209,36 @@ impl OnbEd {
     fn option_mut(&mut self) -> Option<&mut OptionDoc> {
         let at = self.option?;
         self.prompt_mut()?.options.get_mut(at)
+    }
+
+    fn selected(&self) -> Option<(&PromptDoc, &OptionDoc)> {
+        let prompt = self.doc.prompts.get(self.prompt?)?;
+        Some((prompt, prompt.options.get(self.option?)?))
+    }
+
+    fn reset_emoji_picker(&mut self) {
+        self.emoji_query.clear();
+        self.emoji_page = 0;
+    }
+
+    fn custom_emojis_valid(&self, guild: Snowflake, assets: Option<&GuildAssets>) -> bool {
+        self.doc.prompts.iter().all(|prompt| {
+            prompt.options.iter().all(|option| {
+                let OnboardingEmoji::Custom { id, name, animated } = &option.emoji else {
+                    return true;
+                };
+                let unchanged = self
+                    .baseline
+                    .prompts
+                    .iter()
+                    .find(|p| p.id == prompt.id)
+                    .and_then(|p| p.options.iter().find(|o| o.id == option.id))
+                    .is_some_and(|before| before.emoji == option.emoji);
+                unchanged
+                    || source_emoji(assets, guild, *id)
+                        .is_some_and(|emoji| emoji.name == *name && emoji.animated == *animated)
+            })
+        })
     }
 }
 
@@ -330,6 +379,37 @@ impl State {
     /// The server the panel needs the read model of.
     pub fn wanted(&self) -> Option<Snowflake> {
         self.panel.as_ref().map(|p| p.guild)
+    }
+
+    /// Needed only by the visible onboarding editor, not its other tabs.
+    pub fn wanted_assets(&self) -> Option<Snowflake> {
+        self.panel
+            .as_ref()
+            .filter(|p| p.tab == Tab::Onboarding)
+            .map(|p| p.guild)
+    }
+
+    fn emoji_target(&self) -> Option<EmojiTarget> {
+        let panel = self.panel.as_ref().filter(|p| p.tab == Tab::Onboarding)?;
+        let Slot::Ready(ed) = &panel.onboarding else {
+            return None;
+        };
+        let (prompt, option) = ed.selected()?;
+        Some(EmojiTarget {
+            serial: self.serial,
+            guild: panel.guild,
+            prompt: prompt.id,
+            option: option.id,
+        })
+    }
+
+    #[cfg(feature = "fake-discord")]
+    pub(crate) fn fake_emoji(&self, id: Option<Snowflake>) -> Option<Event> {
+        let target = self.emoji_target()?;
+        Some(Event::Onboarding(match id {
+            Some(id) => OnbMsg::OptionCustom(target, id),
+            None => OnbMsg::ClearEmoji(target),
+        }))
     }
 
     pub fn is_rejected(&self, event: &Event) -> bool {
@@ -523,7 +603,7 @@ impl State {
                 self.notice = Some("Wait for the previous change to finish.".to_owned());
             }
             Event::Rules(msg) => self.rules_msg(msg),
-            Event::Onboarding(msg) => self.onboarding_msg(msg),
+            Event::Onboarding(msg) => self.onboarding_msg(msg, navigation),
             Event::Guide(msg) => self.guide_msg(msg),
             Event::Community(msg) => {
                 if let Some(form) = self.panel.as_mut().and_then(|p| p.community.as_mut()) {
@@ -582,7 +662,25 @@ impl State {
         }
     }
 
-    fn onboarding_msg(&mut self, msg: OnbMsg) {
+    fn onboarding_msg(&mut self, msg: OnbMsg, navigation: &NavigationSnapshot) {
+        let target = match &msg {
+            OnbMsg::OptionEmoji(target, _)
+            | OnbMsg::OptionCustom(target, _)
+            | OnbMsg::ClearEmoji(target)
+            | OnbMsg::EmojiQuery(target, _)
+            | OnbMsg::EmojiPage(target, _) => Some(*target),
+            _ => None,
+        };
+        if let Some(target) = target {
+            if self.emoji_target() != Some(target) {
+                return;
+            }
+            if self.allowed(navigation).is_err() {
+                self.notice = Some(NEEDS_MANAGE_GUILD.to_owned());
+                return;
+            }
+        }
+        let assets = navigation.assets.as_ref();
         let (id_a, id_b) = (self.next_id(), self.next_id());
         let Some(Slot::Ready(ed)) = self.panel.as_mut().map(|p| &mut p.onboarding) else {
             return;
@@ -625,6 +723,7 @@ impl State {
                 if at < ed.doc.prompts.len() {
                     ed.prompt = Some(at);
                     ed.option = None;
+                    ed.reset_emoji_picker();
                 }
             }
             OnbMsg::PromptTitle(t) => {
@@ -669,6 +768,7 @@ impl State {
             OnbMsg::SelectOption(at) => {
                 if ed.prompt_mut().is_some_and(|p| at < p.options.len()) {
                     ed.option = Some(at);
+                    ed.reset_emoji_picker();
                 }
             }
             OnbMsg::OptionTitle(t) => {
@@ -681,10 +781,40 @@ impl State {
                     o.description = cut(t, MAX_OPTION_DESCRIPTION_CHARS + 20);
                 }
             }
-            OnbMsg::OptionEmoji(t) => {
+            OnbMsg::OptionEmoji(_, t) => {
                 if let Some(o) = ed.option_mut() {
                     o.emoji = o.emoji.typed(&t);
                 }
+            }
+            OnbMsg::OptionCustom(target, id) => {
+                if let Some(emoji) = source_emoji(assets, target.guild, id) {
+                    if let Some(option) = ed.option_mut() {
+                        option.emoji = OnboardingEmoji::Custom {
+                            id: emoji.id,
+                            name: emoji.name.clone(),
+                            animated: emoji.animated,
+                        };
+                    }
+                } else {
+                    self.notice = Some(EMOJI_UNAVAILABLE.to_owned());
+                }
+            }
+            OnbMsg::ClearEmoji(_) => {
+                if let Some(option) = ed.option_mut() {
+                    option.emoji = OnboardingEmoji::None;
+                }
+            }
+            OnbMsg::EmojiQuery(_, query) => {
+                ed.emoji_query = cut(query, EMOJI_QUERY_CHARS);
+                ed.emoji_page = 0;
+            }
+            OnbMsg::EmojiPage(target, next) => {
+                let page = emoji_choices(assets, target.guild, &ed.emoji_query, ed.emoji_page);
+                ed.emoji_page = if next {
+                    (page.page + 1).min(page.pages - 1)
+                } else {
+                    page.page.saturating_sub(1)
+                };
             }
             OnbMsg::ToggleRole(id) => {
                 if let Some(o) = ed.option_mut() {
@@ -830,6 +960,10 @@ impl State {
                 let Some(Slot::Ready(ed)) = self.panel.as_ref().map(|p| &p.onboarding) else {
                     return Task::none();
                 };
+                if !ed.custom_emojis_valid(guild, navigation.assets.as_ref()) {
+                    self.notice = Some(EMOJI_UNAVAILABLE.to_owned());
+                    return Task::none();
+                }
                 let (baseline, doc) = (ed.baseline.clone(), ed.doc.clone());
                 let refs = Refs::of(admin);
                 self.send(tab, client, move |client| async move {
@@ -989,6 +1123,167 @@ fn toggle(list: &mut Vec<Snowflake>, id: Snowflake) {
     }
 }
 
+const EMOJI_QUERY_CHARS: usize = 64;
+const EMOJI_PAGE_SIZE: usize = 24;
+const EMOJI_UNAVAILABLE: &str = "Choose a current emoji from this server, or clear it.";
+
+fn source_emoji(
+    assets: Option<&GuildAssets>,
+    guild: Snowflake,
+    id: Snowflake,
+) -> Option<&AssetEmoji> {
+    assets
+        .filter(|assets| assets.id == guild)?
+        .emojis
+        .iter()
+        .take(MAX_ASSET_EMOJI)
+        .find(|emoji| emoji.id == id && id.0 != 0 && emoji.usable)
+}
+
+struct EmojiChoices {
+    items: Vec<Item<Snowflake>>,
+    page: usize,
+    pages: usize,
+}
+
+fn emoji_label(emoji: &AssetEmoji, assets: &GuildAssets) -> String {
+    let name: String = emoji.name.chars().take(64).collect();
+    let duplicate = assets
+        .emojis
+        .iter()
+        .take(MAX_ASSET_EMOJI)
+        .any(|other| other.id != emoji.id && other.name == emoji.name);
+    let mut label = if name.is_empty() {
+        tr("Unnamed emoji").to_owned()
+    } else {
+        format!(":{name}:")
+    };
+    if emoji.animated {
+        label.push_str(tr(" (animated)"));
+    }
+    if duplicate || name.is_empty() {
+        label.push_str(&format!(" ({})", emoji.id));
+    }
+    label
+}
+
+fn emoji_choices(
+    assets: Option<&GuildAssets>,
+    guild: Snowflake,
+    query: &str,
+    page: usize,
+) -> EmojiChoices {
+    let Some(assets) = assets.filter(|assets| assets.id == guild) else {
+        return EmojiChoices {
+            items: Vec::new(),
+            page: 0,
+            pages: 1,
+        };
+    };
+    let query = query.trim().to_lowercase();
+    let matches = assets.emojis.iter().take(MAX_ASSET_EMOJI).filter(|emoji| {
+        emoji.id.0 != 0 && emoji.usable && emoji.name.to_lowercase().contains(&query)
+    });
+    let pages = matches.clone().count().div_ceil(EMOJI_PAGE_SIZE).max(1);
+    let page = page.min(pages - 1);
+    let items = matches
+        .skip(page * EMOJI_PAGE_SIZE)
+        .take(EMOJI_PAGE_SIZE)
+        .map(|emoji| Item(emoji.id, emoji_label(emoji, assets)))
+        .collect();
+    EmojiChoices { items, page, pages }
+}
+
+fn emoji_view<'a>(
+    ed: &'a OnbEd,
+    option: &'a OptionDoc,
+    assets: Option<&'a GuildAssets>,
+    edit: bool,
+    target: EmojiTarget,
+) -> Element<'a, Event> {
+    let msg = |m| Event::Onboarding(m);
+    let source = assets.filter(|assets| assets.id == target.guild);
+    let mut body = column![
+        labelled(
+            "Unicode emoji",
+            input("Optional", option.emoji.text(), edit, move |text| msg(
+                OnbMsg::OptionEmoji(target, text)
+            ))
+        ),
+        row![
+            text(tr("Custom emoji")).size(12),
+            space::horizontal(),
+            button(text(tr("Clear emoji")).size(12)).on_press_maybe(
+                (edit && option.emoji != OnboardingEmoji::None)
+                    .then_some(msg(OnbMsg::ClearEmoji(target)))
+            )
+        ],
+    ]
+    .spacing(4);
+    if let OnboardingEmoji::Custom { id, name, animated } = &option.emoji {
+        let current = source_emoji(source, target.guild, *id);
+        let label = match (current, source) {
+            (Some(emoji), Some(assets)) => emoji_label(emoji, assets),
+            _ => trf(
+                "Unavailable emoji: {} ({})",
+                &[
+                    &format!(
+                        ":{}:{}",
+                        name.chars().take(64).collect::<String>(),
+                        if *animated { tr(" (animated)") } else { "" }
+                    ),
+                    id,
+                ],
+            ),
+        };
+        body = body.push(text(label).size(12));
+        if current.is_none() {
+            body = body.push(small(
+                "Existing custom emoji is kept until you replace or clear it.",
+            ));
+        }
+    }
+    let page = emoji_choices(source, target.guild, &ed.emoji_query, ed.emoji_page);
+    body = body.push(input(
+        "Search server emoji",
+        &ed.emoji_query,
+        edit && source.is_some(),
+        move |query| msg(OnbMsg::EmojiQuery(target, query)),
+    ));
+    if page.items.is_empty() {
+        body = body.push(small(if source.is_none() {
+            "Server emoji are unavailable. Existing emoji are kept."
+        } else {
+            "No server emoji match this search."
+        }));
+    } else {
+        let choices = column(page.items.into_iter().map(|Item(id, label)| {
+            button(text(label).size(12))
+                .width(Length::Fill)
+                .on_press_maybe(edit.then_some(msg(OnbMsg::OptionCustom(target, id))))
+                .into()
+        }))
+        .spacing(2);
+        body = body.push(scrollable(choices).height(126));
+    }
+    if page.pages > 1 {
+        body = body.push(
+            row![
+                button(text(tr("Previous")).size(12)).on_press_maybe(
+                    (edit && page.page > 0).then_some(msg(OnbMsg::EmojiPage(target, false)))
+                ),
+                text(trf("Page {} of {}", &[&(page.page + 1), &page.pages])).size(12),
+                button(text(tr("Next")).size(12)).on_press_maybe(
+                    (edit && page.page + 1 < page.pages)
+                        .then_some(msg(OnbMsg::EmojiPage(target, true)))
+                ),
+            ]
+            .spacing(6),
+        );
+    }
+    body.into()
+}
+
 // ----------------------------------------------------------------- view
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1120,7 +1415,13 @@ fn rules_view<'a>(ed: &'a RulesEd, edit: bool) -> Element<'a, Event> {
     panel.into()
 }
 
-fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Element<'a, Event> {
+fn onboarding_view<'a>(
+    ed: &'a OnbEd,
+    admin: &'a GuildAdmin,
+    assets: Option<&'a GuildAssets>,
+    edit: bool,
+    serial: u64,
+) -> Element<'a, Event> {
     let doc = &ed.doc;
     let msg = |m: OnbMsg| Event::Onboarding(m);
     let mut panel = column![
@@ -1202,7 +1503,7 @@ fn onboarding_view<'a>(ed: &'a OnbEd, admin: &'a GuildAdmin, edit: bool) -> Elem
         );
     }
     if let Some(prompt) = ed.prompt.and_then(|at| doc.prompts.get(at)) {
-        panel = panel.push(prompt_view(ed, prompt, admin, edit));
+        panel = panel.push(prompt_view(ed, prompt, admin, assets, edit, serial));
     }
     panel.into()
 }
@@ -1211,7 +1512,9 @@ fn prompt_view<'a>(
     ed: &'a OnbEd,
     prompt: &'a PromptDoc,
     admin: &'a GuildAdmin,
+    assets: Option<&'a GuildAssets>,
     edit: bool,
+    serial: u64,
 ) -> Element<'a, Event> {
     let msg = |m: OnbMsg| Event::Onboarding(m);
     let mut panel = column![
@@ -1270,7 +1573,19 @@ fn prompt_view<'a>(
         );
     }
     if let Some(option) = ed.option.and_then(|at| prompt.options.get(at)) {
-        panel = panel.push(option_view(ed, option, admin, edit));
+        panel = panel.push(option_view(
+            ed,
+            option,
+            admin,
+            assets,
+            edit,
+            EmojiTarget {
+                serial,
+                guild: admin.id,
+                prompt: prompt.id,
+                option: option.id,
+            },
+        ));
     }
     panel.into()
 }
@@ -1279,7 +1594,9 @@ fn option_view<'a>(
     ed: &'a OnbEd,
     option: &'a OptionDoc,
     admin: &'a GuildAdmin,
+    assets: Option<&'a GuildAssets>,
     edit: bool,
+    target: EmojiTarget,
 ) -> Element<'a, Event> {
     let msg = |m: OnbMsg| Event::Onboarding(m);
     let old_roles: Vec<Snowflake> = ed
@@ -1289,11 +1606,6 @@ fn option_view<'a>(
         .flat_map(|p| &p.options)
         .flat_map(|o| o.role_ids.iter().copied())
         .collect();
-    let emoji_note = if option.emoji.is_custom() {
-        "Custom emoji kept; type a Unicode emoji to replace it."
-    } else {
-        "Unicode emoji only."
-    };
     let mut panel = column![
         labelled(
             "Answer",
@@ -1307,13 +1619,7 @@ fn option_view<'a>(
                 msg(OnbMsg::OptionDescription(t))
             }),
         ),
-        labelled(
-            "Emoji",
-            input("Optional", option.emoji.text(), edit, move |t| msg(
-                OnbMsg::OptionEmoji(t)
-            )),
-        ),
-        small(emoji_note),
+        emoji_view(ed, option, assets, edit, target),
         text(tr("Roles given")).size(13),
     ]
     .spacing(4)
@@ -1585,14 +1891,20 @@ pub fn view<'a>(
     }
     let content = match panel.tab {
         Tab::Rules => slot(&panel.rules, |ed| rules_view(ed, edit)),
-        Tab::Onboarding => slot(&panel.onboarding, |ed| onboarding_view(ed, admin, edit)),
+        Tab::Onboarding => slot(&panel.onboarding, |ed| {
+            onboarding_view(ed, admin, navigation.assets.as_ref(), edit, state.serial)
+        }),
         Tab::Guide => slot(&panel.guide, |ed| guide_view(ed, admin, edit)),
         Tab::Community => match &panel.community {
             Some(form) => community_view(form, admin, edit),
             None => small("Loading\u{2026}").into(),
         },
     };
-    body = body.push(scrollable(container(content).padding([0, 8])).height(Length::Fixed(320.0)));
+    body = body.push(
+        scrollable(container(content).padding([0, 8]))
+            .id(iced::widget::Id::new("community-content"))
+            .height(Length::Fixed(320.0)),
+    );
     let save_label = if panel.tab == Tab::Community {
         "Turn on Community"
     } else {
