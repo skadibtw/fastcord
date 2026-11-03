@@ -168,7 +168,18 @@ impl State {
         }
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Index(serial, ..) => self
+                .loading
+                .as_ref()
+                .is_some_and(|loading| loading.serial == *serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Index(_, _, r) => auth_rejected(r),
             _ => false,

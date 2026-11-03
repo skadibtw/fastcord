@@ -332,7 +332,18 @@ impl State {
         self.panel.as_ref().map(|p| p.guild)
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::RulesLoaded(serial, ..)
+            | Event::OnboardingLoaded(serial, ..)
+            | Event::GuideLoaded(serial, ..)
+            | Event::Saved(serial, ..) => *serial == self.serial,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(
             event,
             Event::RulesLoaded(_, Err(RestError::AuthenticationRequired))

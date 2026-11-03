@@ -8,6 +8,15 @@
 - Failed scripted screenshots now stop subsequent actions, quit gracefully and exit unsuccessfully; capture cancellation, timeouts, oversize windows and PNG save errors cannot acknowledge stale evidence (#236).
 - Honor fixed Windows timezone snapshots, including fully disabled DST, without reloading transition dates from the zone registry (#92).
 - Resolve scheduled-event local times on Windows using date-specific native rules; reject DST gaps/folds and failed conversions, preserve historical offsets, and refresh after timezone changes through the existing bounded worker cache (#92).
+- Isolate the scheduled-event edit/cache regression from concurrent account resets, keeping native CI deterministic without changing runtime timezone behavior.
+
+- Give every rules, onboarding-question and server-guide read its own panel ownership; close, replacement and account reset cancel retired reads without cancelling or retrying pending writes (#243).
+- Keep thread creation responses scoped to their original draft and account; late responses cannot clear a replacement draft or navigate away from the current channel (#238).
+- Scope onboarding role preselection and editing to the owning guild, preserving loaded choices while a different server is selected (#239).
+- Ignore retired panel request authentication failures before routing logout, so an old account or cancelled preview cannot reject the replacement account (#232).
+- Reserve bounded compressed-video backlog for audio-synchronized presentation and repaired bursts; fall back to immediate presentation under queue pressure instead of needlessly breaking the reference chain (#234).
+- Preserve unfinished multi-select answers when reactions or unrelated message fields change; invalidate the draft when its component tree changes or the row becomes hidden, pending, deleted or leaves the conversation (#235).
+- Give each scheduled-event list request distinct ownership and cancel it on close/reopen/reset; ignore stale list, attendee and write authentication failures while preserving in-flight write deduplication (#237).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.
@@ -60,6 +69,7 @@
 - Preserve categorical voice reconnect causes and record them in the release voice log, distinguishing signaling Resume (retained UDP/keys) from a new media session (#230).
 
 ### Added
+- Deterministic App regression for repeated manual reconnect during blocked voice-volume persistence: the latest mute survives stale disk snapshots, coalesced dragging, flush and writer/account status changes (#233).
 - Browse public, joined-private and manager-only private thread archives with their respective pagination cursors (#63).
 - Browse accessible server channels with bounded search/pages, independently of folded sidebar categories; selection rechecks current permissions (#91).
 - Refuse screening consent when TERMS values are absent or not an array, as well as when rules are truncated (#91).

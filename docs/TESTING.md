@@ -845,6 +845,8 @@ Offline: `fastcord-app` `notify::tests` cover what notifies (DM or mention, wind
 
 Regression #92: `replayed_event_deletes_preserve_the_full_tombstone_window_and_byte_ledger` fills the deletion window, replays a delete and checks stale updates/lists do not resurrect events and the byte ledger matches.
 
+`editing_starts_from_the_event_and_an_unmoved_start_may_be_in_the_past` runs its actual cache preparation and editor/save transitions in an exact-test child process. Account-worker construction deliberately clears the shared display-offset publication, so unrelated parallel account/reconnect tests must not share this fixture's process. The child checks offset availability, rejects editing completed events, opens the active event, and accepts its unchanged past start; it does not change OS timezone preferences or poll a network task.
+
 - **Automated:** `fastcord-model` `scheduled_event::tests` (decoding, external location, unknown kinds, bounded text, recurrence text); `fastcord-discord` `scheduled_event::tests` (list parsing from the synthetic fixture, routes and bodies of every write, draft checks, permission and state gating of every action, CREATE_EVENTS limited to own events) and `state::navigation::tests` (`GUILD_CREATE` events, create/update/delete replay and stale handling, interest add/remove counted once, a late list not reviving a deleted event, 100-per-guild bound with ended events first, snapshot order, byte ledger); `fastcord-app` `scheduled_events::tests` (local time parsing, one write in flight, confirmations, 403/404/429/network/401 handling, stale answers after logout or for another server, form checks, banner selection, join gating).
 - **Outstanding gates (alt account only, unchecked, unverified routes):**
   - [ ] `GET /guilds/{id}/scheduled-events?with_user_count=true` answers for a user account and the shape matches `docs/PROTOCOL.md`; READY/`GUILD_CREATE` does or does not carry `guild_scheduled_events`.
@@ -1284,3 +1286,26 @@ Validation status: three portable source-inclusion tests passed locally on Linux
 
 
 Windows CI follow-up: the first native run exposed that the Ex conversion reintroduced registry DST for a disabled-dynamic snapshot with cleared transition dates. The backend now uses the exact fixed `TIME_ZONE_INFORMATION` with `SystemTimeToTzSpecificLocalTime` for both conversion and candidate validation when dynamic rules are disabled; normal dynamic snapshots retain the historical Ex/year-rule path. The original failing -05:00 assertion remains. The fixed half-hour fixture now traverses the production backend, and stronger assertions cover supplied dates differing from the installed registry, no-DST spring/fall civil times, and an empty registry key. A sixth native test compares a real `GetDynamicTimeZoneInformation` snapshot to the OS current-zone conversion without changing settings. Exact-source Windows-target check and Clippy passed after this fix; native execution of the fix remains pending CI. No claim is made that the CI machine has its own DST setting disabled.
+
+
+### Synchronized receive backlog (#234)
+
+`gateway::stream_video::tests::accepted_audio_lead_and_repair_burst_preserve_real_video_references`
+uses a handshake gate to queue the reported 300 ms / 60 fps backlog and the
+maximum 500 ms backlog at 30 and 60 fps, each followed by the bounded 13-frame
+repair burst. The real dav1d decoder must preserve every fixture pixel and
+output timestamp without a queue drop or keyframe request. It does not depend
+on CI scheduling a test receiver before a short deadline. The separate
+`shifting_audio_clock_yields_to_queue_pressure_without_abandoning_references`
+exercises the production presentation decision with repeatedly renewed waits,
+count and byte pressure, normal scheduling after draining, late output and the
+absolute wait limit. Existing tests retain exact frame/byte overflow bounds,
+real Opus output-clock scheduling, stale clock fallback, mute, source replacement,
+suspension and teardown. Only decoders configured for stream synchronization grow their compressed allowance to 43 frames; cameras retain 13. The
+6 MiB byte cap and the one borrowed decoded picture remain unchanged. Physical
+lip-sync and native device latency acceptance remain separate checks.
+
+### Reconnect while volume persistence is blocked (#233)
+
+`repeated_manual_reconnect_keeps_pending_mute_while_persistence_is_blocked` seeds an isolated temporary CSV at 100%, holds the actual persistence mutex through a thread handshake, performs 3,216 slider changes and sixteen actual App manual reconnects ending at 0%, and merges the stale disk snapshot into each replacement bridge. It checks retained writer thread/status ownership, zero before/after the real flush and another reconnect, and old-account status rejection after teardown/re-entry. Returned network/subscription tasks are dropped; no account credentials or API requests are used. A thirty-second watchdog only releases a regressed blocking path so it reports failure instead of hanging.
+

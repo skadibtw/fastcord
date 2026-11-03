@@ -99,7 +99,15 @@ impl State {
     }
 
     /// A 401 stops the account like every other request.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Page(serial, ..) => *serial == self.generation,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Page(_, _, r) => auth_rejected(r),
             _ => false,
@@ -302,8 +310,13 @@ mod tests {
         state.clear();
         let _ = state.update(Event::Page(before, 0, Ok(page(0, 3))), &client);
         assert!(state.guilds.is_empty());
-        assert!(State::is_rejected(&Event::Page(
+        assert!(!state.is_rejected(&Event::Page(
+            before,
             0,
+            Err(RestError::AuthenticationRequired)
+        )));
+        assert!(state.is_rejected(&Event::Page(
+            state.generation,
             0,
             Err(RestError::AuthenticationRequired)
         )));

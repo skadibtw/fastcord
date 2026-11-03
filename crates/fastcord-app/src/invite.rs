@@ -962,7 +962,20 @@ impl State {
     }
 
     /// A 401 on any membership request stops the account like everywhere else.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Resolved(serial, ..)
+            | Event::Joined(serial, ..)
+            | Event::Left(serial, ..)
+            | Event::Created(serial, ..)
+            | Event::Listed(serial, ..)
+            | Event::Revoked(serial, ..) => *serial == self.generation,
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Resolved(_, _, r) => auth_rejected(r),
             Event::Joined(_, _, r) => auth_rejected(r),

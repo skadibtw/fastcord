@@ -602,35 +602,41 @@ fn a_full_control_queue_is_retried_with_the_next_frame_not_forgotten() {
 
 #[test]
 fn a_decoder_that_cannot_keep_up_drops_the_chain_within_its_bounds() {
-    let (control, requests, mut decoder) = setup();
-    // The decoder takes the first frame and stalls inside it.
-    decoder.push(video(SSRC, 0, true, vec![BLOCK]));
-    control.wait_entered();
-    for index in 1..=MAX_QUEUED_FRAMES as u32 {
-        decoder.push(video(SSRC, index, false, vec![index as u8]));
+    for synchronized in [false, true] {
+        let (control, requests, mut decoder) = setup();
+        if synchronized {
+            decoder.set_av_sync(Arc::new(super::super::av_sync::AvSync::default()));
+        }
+        let limit = decoder.shared.lock().max_frames;
+        // The decoder takes the first frame and stalls inside it.
+        decoder.push(video(SSRC, 0, true, vec![BLOCK]));
+        control.wait_entered();
+        for index in 1..=limit as u32 {
+            decoder.push(video(SSRC, index, false, vec![index as u8]));
+        }
+        assert_eq!(decoder.shared.lock().frames.len(), limit);
+        assert!(requests.lock().is_empty());
+        // One more does not fit: the queued chain and this frame are dropped, the
+        // stream waits for a keyframe, and the sender is asked once.
+        decoder.push(video(SSRC, 9, false, vec![9]));
+        {
+            let queue = decoder.shared.lock();
+            assert!(queue.frames.is_empty() && queue.bytes == 0 && queue.awaiting_keyframe);
+        }
+        assert_eq!(*requests.lock(), [SSRC]);
+        decoder.push(video(SSRC, 10, false, vec![10]));
+        decoder.push(video(SSRC, 11, false, vec![11]));
+        assert_eq!(requests.lock().len(), 1, "waiting is not asked about again");
+        assert_eq!(decoder.stats().frames_dropped, limit as u64 + 3);
+        // A keyframe is accepted again and decodes after the stalled frame.
+        decoder.push(video(SSRC, 12, true, vec![12]));
+        control.release();
+        wait_for(&decoder, |stats| stats.frames_processed == 2);
+        let stats = decoder.finish();
+        assert_eq!(control.log(), [BLOCK, 12]);
+        assert_eq!(stats.keyframes_requested, 1);
+        assert_accounted(&stats);
     }
-    assert_eq!(decoder.shared.lock().frames.len(), MAX_QUEUED_FRAMES);
-    assert!(requests.lock().is_empty());
-    // One more does not fit: the queued chain and this frame are dropped, the
-    // stream waits for a keyframe, and the sender is asked once.
-    decoder.push(video(SSRC, 9, false, vec![9]));
-    {
-        let queue = decoder.shared.lock();
-        assert!(queue.frames.is_empty() && queue.bytes == 0 && queue.awaiting_keyframe);
-    }
-    assert_eq!(*requests.lock(), [SSRC]);
-    decoder.push(video(SSRC, 10, false, vec![10]));
-    decoder.push(video(SSRC, 11, false, vec![11]));
-    assert_eq!(requests.lock().len(), 1, "waiting is not asked about again");
-    assert_eq!(decoder.stats().frames_dropped, MAX_QUEUED_FRAMES as u64 + 3);
-    // A keyframe is accepted again and decodes after the stalled frame.
-    decoder.push(video(SSRC, 12, true, vec![12]));
-    control.release();
-    wait_for(&decoder, |stats| stats.frames_processed == 2);
-    let stats = decoder.finish();
-    assert_eq!(control.log(), [BLOCK, 12]);
-    assert_eq!(stats.keyframes_requested, 1);
-    assert_accounted(&stats);
 }
 
 #[test]
@@ -1379,4 +1385,162 @@ fn reordered_picture_uses_its_own_pts_instead_of_the_compressed_input_pts() {
         }
     }
     assert_eq!(decoder.finish().pictures_decoded, 2);
+}
+
+/// A native decode gate makes the complete accepted synchronization backlog
+/// arrive before presentation, without depending on a CI thread getting CPU
+/// within a short audio-clock window. The real reference decoder follows it.
+struct GatedDecoder {
+    inner: Box<dyn VideoDecoder>,
+    gate: Arc<Control>,
+    first: bool,
+}
+
+impl VideoDecoder for GatedDecoder {
+    fn backend(&self) -> &Backend {
+        self.inner.backend()
+    }
+
+    fn decode(
+        &mut self,
+        unit: &[u8],
+        timestamp: Duration,
+        out: &mut dyn FnMut(DecodedFrame<'_>),
+    ) -> Result<(), CodecError> {
+        if self.first {
+            self.first = false;
+            *self.gate.entered.lock() = true;
+            self.gate.changed.notify_all();
+            let mut released = self.gate.released.lock();
+            while !*released {
+                self.gate.changed.wait(&mut released);
+            }
+        }
+        self.inner.decode(unit, timestamp, out)
+    }
+
+    fn flush(&mut self, out: &mut dyn FnMut(DecodedFrame<'_>)) -> Result<(), CodecError> {
+        self.inner.flush(out)
+    }
+}
+
+#[test]
+fn accepted_audio_lead_and_repair_burst_preserve_real_video_references() {
+    // The reported regression (300 ms at 60 fps) and the maximum supported
+    // wait at both rates. The transport can deliver 13 repaired frames at once.
+    for (lead_ms, fps) in [(300u32, 60u32), (500, 30), (500, 60)] {
+        let backlog = (lead_ms * fps).div_ceil(1000) as usize
+            + fastcord_media::gateway::WATCH_VIDEO_QUEUE_FRAMES;
+        let gate = Arc::new(Control::default());
+        let worker_gate = gate.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (sent, received) = mpsc::channel();
+        let mut decoder = StreamDecoder::with(Config {
+            open: Box::new(move |codec| {
+                Ok(Box::new(GatedDecoder {
+                    inner: open_decoder(codec)?,
+                    gate: worker_gate.clone(),
+                    first: true,
+                }))
+            }),
+            request_keyframe: requester(&requests, 0),
+            visible: Arc::new(AtomicBool::new(true)),
+            status: Arc::new(|_| {}),
+            sink: Some(Box::new(move |_, frame| {
+                let mut pixels = Vec::new();
+                frame.image.copy_packed_into(&mut pixels);
+                sent.send((frame.timestamp, pixels)).unwrap();
+            })),
+        });
+        // Install stream synchronization before admission. The gate, rather
+        // than a wall-clock sleep, holds the accepted presentation backlog.
+        decoder.set_av_sync(Arc::new(super::super::av_sync::AvSync::default()));
+        let frames = units();
+        let make_frame = |index: usize| {
+            let mut frame = video(
+                SSRC,
+                index as u32,
+                index.is_multiple_of(3),
+                frames[index % 3].clone(),
+            );
+            frame.timestamp = index as u32 * 90_000 / fps;
+            frame
+        };
+        decoder.push(make_frame(0));
+        gate.wait_entered();
+        for index in 1..=backlog {
+            decoder.push(make_frame(index));
+        }
+        let queued = decoder.shared.lock().frames.len();
+        let bytes = decoder.shared.lock().bytes;
+        let dropped = decoder.stats().frames_dropped;
+        gate.release();
+        assert_eq!(queued, backlog, "{lead_ms} ms at {fps} fps plus repair");
+        assert!(bytes <= MAX_QUEUED_BYTES);
+        assert_eq!(dropped, 0, "audio lead must not invalidate reference input");
+        for index in 0..=backlog {
+            let (timestamp, pixels) = received.recv_timeout(Duration::from_secs(30)).unwrap();
+            assert_eq!(
+                timestamp,
+                Duration::from_nanos(
+                    u64::from(index as u32 * 90_000 / fps) * 1_000_000_000 / RTP_CLOCK_HZ
+                )
+            );
+            assert_eq!(pixels, picture(index % 3), "reference picture {index}");
+        }
+        let stats = decoder.finish();
+        assert_eq!(stats.frames_dropped, 0);
+        assert_eq!(stats.frames_processed, backlog as u64 + 1);
+        assert!(requests.lock().is_empty(), "no repair of an intact stream");
+    }
+}
+
+#[test]
+fn shifting_audio_clock_yields_to_queue_pressure_without_abandoning_references() {
+    use super::super::av_sync::{Decision, MAX_WAIT};
+    let (_control, requests, decoder) = setup();
+    decoder.set_av_sync(Arc::new(super::super::av_sync::AvSync::default()));
+    let mut queue = decoder.shared.lock();
+    // Keep moving the deadline forward indefinitely. At the pressure boundary
+    // we must make progress even though no individual wait has timed out.
+    for index in 0..SYNC_BACKLOG_FRAMES {
+        queue
+            .frames
+            .push_back(video(SSRC, index as u32, index == 0, vec![1]));
+        queue.bytes += 1;
+    }
+    for _ in 0..100 {
+        assert_eq!(
+            queue.presentation_decision(Decision::Wait(MAX_WAIT), Duration::ZERO),
+            Decision::Immediate
+        );
+        let frame = queue.pop().unwrap();
+        assert_eq!(
+            queue.presentation_decision(Decision::Wait(MAX_WAIT), Duration::ZERO),
+            Decision::Wait(MAX_WAIT)
+        );
+        queue.bytes += frame.data.len();
+        queue.frames.push_back(frame);
+    }
+    queue.clear();
+    // Leave a whole 4 MiB repair burst of headroom under the unchanged byte cap.
+    queue
+        .frames
+        .push_back(video(SSRC, 0, true, vec![1; 2 << 20]));
+    queue.bytes = 2 << 20;
+    assert_eq!(
+        queue.presentation_decision(Decision::Wait(MAX_WAIT), Duration::ZERO),
+        Decision::Immediate
+    );
+    assert_eq!(
+        queue.presentation_decision(Decision::Late, Duration::ZERO),
+        Decision::Late
+    );
+    queue.clear();
+    assert_eq!(
+        queue.presentation_decision(Decision::Wait(MAX_WAIT), MAX_WAIT),
+        Decision::Immediate
+    );
+    assert_eq!(queue.bytes, 0);
+    assert!(requests.lock().is_empty());
 }

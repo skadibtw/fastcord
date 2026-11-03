@@ -2359,7 +2359,7 @@ and a fourth"
         let Some(session) = self.phase.session() else {
             return Task::none();
         };
-        let rejected = account_panel::State::is_rejected(&event);
+        let rejected = self.ui.account_panel.is_rejected(&event);
         let (task, action) = self.ui.account_panel.update(event, &session.client);
         if rejected && let Some(gateway) = self.phase.gateway() {
             let id = gateway.id;

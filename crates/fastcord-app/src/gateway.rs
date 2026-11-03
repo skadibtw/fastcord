@@ -2080,6 +2080,14 @@ impl NavigationBridge {
         });
     }
 
+    #[cfg(test)]
+    pub(crate) fn requested_thread(&self) -> Option<(Snowflake, Snowflake)> {
+        match self.requests.borrow().selection.as_ref() {
+            Some(SelectionIntent::Thread(guild, thread)) => Some((*guild, thread.id)),
+            _ => None,
+        }
+    }
+
     pub fn open_thread(&self, guild: Snowflake, thread: Channel) {
         self.clear_private_notice();
         self.requests.send_modify(|request| {
@@ -4129,6 +4137,11 @@ impl GatewayPanel {
     pub fn consume(&mut self) -> Option<GatewayStatus> {
         let consumed = self.controls.consume();
         self.navigation = consumed.navigation;
+        self.component_choices = crate::component_view::reconcile(
+            self.component_choices,
+            &self.timeline,
+            &consumed.timeline,
+        );
         self.timeline = consumed.timeline;
         self.emoji_snapshot = consumed.emoji;
         if self.emoji_picker.request.channel != self.timeline.channel_id {
@@ -4181,16 +4194,6 @@ impl GatewayPanel {
         );
         self.call_view.prune(&crate::call_layout::ids(&tiles));
         self.composer.select(self.timeline.channel_id);
-        if self.component_choices.is_some_and(|choices| {
-            self.timeline.channel_id != Some(choices.channel)
-                || !self.timeline.rows.iter().any(|row| {
-                    row.message.id == choices.message
-                        && row.revision == choices.revision
-                        && row.component_pending.is_none()
-                })
-        }) {
-            self.component_choices = None;
-        }
 
         if self
             .confirm_delete
@@ -5291,6 +5294,123 @@ mod bridge_tests {
         });
         panel.composer.select(Some(Snowflake(500)));
         panel
+    }
+
+    #[test]
+    fn multi_select_survives_reactions_through_the_store_panel_and_submit_button() {
+        use crate::component_view::Choices;
+        use fastcord_discord::gateway::{Dispatch, MessageReaction};
+        use fastcord_discord::{history::HistoryCursor, message_store::MessageStore};
+        let (channel, message) = (Snowflake(500), Snowflake(7));
+        let message_body = serde_json::from_value(serde_json::json!({
+            "id": "7", "channel_id": "500", "content": "Choose two",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "author": {"id": "9", "username": "app", "bot": true},
+            "components": [{"type": 1, "components": [{
+                "type": 3, "custom_id": "multi", "min_values": 2, "max_values": 2,
+                "options": [{"label": "A", "value": "a"}, {"label": "B", "value": "b"},
+                            {"label": "C", "value": "c"}]
+            }]}]
+        }))
+        .unwrap();
+        let mut store = MessageStore::new();
+        let token = store.begin_page(channel, HistoryCursor::Latest);
+        store.merge_page(token, vec![message_body]);
+        let bridge = NavigationBridge::new();
+        let mut commands = bridge.take_commands().unwrap();
+        let mut panel = panel(&bridge);
+        let snapshot = |store: &MessageStore| timeline::Snapshot {
+            channel_id: Some(channel),
+            can_send: true,
+            rows: vec![timeline::Row::new(
+                store.get(channel, message).unwrap(),
+                store.revision(channel, message).unwrap(),
+            )],
+            ..Default::default()
+        };
+        let publish = |snapshot| {
+            bridge.publish(Default::default(), snapshot, Default::default(), None);
+        };
+        publish(snapshot(&store));
+        panel.consume();
+        let key = Choices {
+            channel,
+            message,
+            revision: panel.timeline.rows[0].revision,
+            select: 0,
+            mask: 0,
+        };
+        for option in [0, 1] {
+            panel.message_action(timeline::Event::SelectChoice { key, option });
+        }
+        assert_eq!(panel.component_choices.unwrap().mask, 3);
+        let reaction = MessageReaction {
+            channel_id: channel,
+            message_id: message,
+            guild_id: None,
+            user_id: Snowflake(99),
+            burst: false,
+            emoji: Emoji {
+                id: None,
+                name: Some("👍".into()),
+                animated: false,
+            },
+        };
+        for dispatch in [
+            Dispatch::MessageReactionAdd(Box::new(reaction.clone())),
+            Dispatch::MessageReactionRemove(Box::new(reaction)),
+        ] {
+            store.apply_dispatch(&dispatch);
+            publish(snapshot(&store));
+            panel.consume();
+            let held = panel.component_choices.unwrap();
+            assert_eq!(held.mask, 3);
+            assert_eq!(held.revision, store.revision(channel, message).unwrap());
+            assert_ne!(held.revision, key.revision);
+        }
+        // The old view cannot change the newly stamped draft.
+        panel.message_action(timeline::Event::SelectChoice { key, option: 0 });
+        assert_eq!(panel.component_choices.unwrap().mask, 3);
+        // Exercise the actual Submit widget and route its values to the worker.
+        let mut ui = crate::variable_list::harness::Ui::new(
+            400.0,
+            400.0,
+            crate::component_view::view(&panel.timeline.rows[0], channel, panel.component_choices),
+        );
+        ui.redraw();
+        ui.draw();
+        let submitted = (0..250)
+            .step_by(4)
+            .find_map(|y| {
+                ui.click(12.0, y as f32)
+                    .into_iter()
+                    .find(|event| matches!(event, timeline::Event::Component { .. }))
+            })
+            .expect("Submit stays enabled with the same choices");
+        drop(ui);
+        panel.message_action(submitted);
+        assert!(matches!(commands.try_recv(), Ok(Command::Interact(action))
+            if matches!(action.as_ref(), crate::interactions::Action::Component { values, .. } if values.as_slice() == ["a", "b"])));
+
+        // Pending and deletion still clear the local draft.
+        let mut pending = snapshot(&store);
+        pending.rows[0].component_pending = Some("multi".into());
+        publish(pending);
+        panel.consume();
+        assert!(panel.component_choices.is_none());
+        publish(snapshot(&store));
+        panel.consume();
+        let key = Choices {
+            revision: panel.timeline.rows[0].revision,
+            ..key
+        };
+        panel.message_action(timeline::Event::SelectChoice { key, option: 0 });
+        publish(timeline::Snapshot {
+            channel_id: Some(channel),
+            ..Default::default()
+        });
+        panel.consume();
+        assert!(panel.component_choices.is_none());
     }
 
     #[test]

@@ -327,7 +327,17 @@ impl State {
         self.panel.as_ref().map(|p| p.guild)
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Loaded(serial, ..) | Event::Deleted(serial, ..) | Event::Done(serial, ..) => {
+                self.gate.is_current(*serial)
+            }
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Loaded(_, r) => auth_rejected(r),
             Event::Deleted(_, _, r) => auth_rejected(r),
@@ -1589,17 +1599,16 @@ mod tests {
             &client(),
         );
         assert!(state.panel.is_none());
-        assert!(State::is_rejected(&Event::Loaded(
-            1,
-            Err(RestError::AuthenticationRequired)
-        )));
-        assert!(State::is_rejected(&Event::Done(
-            1,
+        assert!(
+            State::default().is_rejected(&Event::Loaded(0, Err(RestError::AuthenticationRequired)))
+        );
+        assert!(State::default().is_rejected(&Event::Done(
+            0,
             Op::Save,
             Err(AutoModRequestError::Rest(RestError::AuthenticationRequired))
         )));
-        assert!(!State::is_rejected(&Event::Deleted(
-            1,
+        assert!(!State::default().is_rejected(&Event::Deleted(
+            0,
             Snowflake(1),
             Err(RestError::PermissionDenied)
         )));

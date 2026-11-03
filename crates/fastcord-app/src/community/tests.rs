@@ -331,8 +331,8 @@ fn failures_keep_the_form_and_use_discords_words() {
         Err(CommunityRequestError::Invalid(CommunityError::TooManyRules)),
     );
     assert!(state.notice.as_deref().unwrap().contains("rules"));
-    assert!(State::is_rejected(&Event::Saved(
-        0,
+    assert!(state.is_rejected(&Event::Saved(
+        state.serial,
         Tab::Rules,
         Err(CommunityRequestError::Rest(
             RestError::AuthenticationRequired

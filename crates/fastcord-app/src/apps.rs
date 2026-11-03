@@ -123,7 +123,20 @@ impl State {
         };
     }
 
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Authorized(serial, ..)
+            | Event::Integrations(serial, ..)
+            | Event::Webhooks(serial, ..)
+            | Event::Removed(serial, ..)
+            | Event::Created(serial, ..)
+            | Event::Edited(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         match event {
             Event::Authorized(_, r) => auth_rejected(r),
             Event::Integrations(_, _, r) => auth_rejected(r),
@@ -1192,7 +1205,7 @@ mod tests {
                 "{notice}"
             );
         }
-        assert!(State::is_rejected(&Event::Removed(
+        assert!(State::default().is_rejected(&Event::Removed(
             0,
             Target::App(Snowflake(1)),
             Err(RestError::AuthenticationRequired)

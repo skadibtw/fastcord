@@ -412,7 +412,15 @@ impl State {
     }
 
     /// A 401 from this panel's request: the caller stops the account.
-    pub fn is_rejected(event: &Event) -> bool {
+    pub fn is_rejected(&self, event: &Event) -> bool {
+        // A cancelled or retired request must not reject the current account.
+        let current = match event {
+            Event::Done(serial, ..) => self.life.is_current(*serial),
+            _ => false,
+        };
+        if !current {
+            return false;
+        }
         matches!(
             event,
             Event::Done(
@@ -743,8 +751,8 @@ mod tests {
             Action::Name,
             Err(ProfileRequestError::Rest(RestError::AuthenticationRequired)),
         );
-        assert!(State::is_rejected(&rejected));
-        assert!(!State::is_rejected(&Event::Toggle));
+        assert!(State::default().is_rejected(&rejected));
+        assert!(!State::default().is_rejected(&Event::Toggle));
     }
 
     #[tokio::test]
