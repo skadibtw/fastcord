@@ -43,10 +43,30 @@ fn detect() -> Option<bool> {
     linux::read(c"")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn detect() -> Option<bool> {
+    windows::read()
+}
+
+#[cfg(target_os = "macos")]
+fn detect() -> Option<bool> {
+    macos::read()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn detect() -> Option<bool> {
     None
 }
+
+#[cfg(target_os = "macos")]
+#[path = "clock_format/macos.rs"]
+mod macos;
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[path = "clock_format/native.rs"]
+mod native;
+#[cfg(any(target_os = "windows", test))]
+#[path = "clock_format/windows.rs"]
+mod windows;
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]

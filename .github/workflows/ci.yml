@@ -67,6 +67,9 @@ jobs:
       # fake-discord on, so this is the configuration that ships (#160).
       - run: cargo clippy --workspace --exclude fastcord-fake --all-targets --locked -- -D warnings
       - run: cargo test --workspace --exclude fastcord-fake --all-targets --locked
+        timeout-minutes: 30
+        env:
+          RUST_BACKTRACE: "1"
       - name: Fake server and debug-only fake mode
         run: |
           cargo clippy -p fastcord-fake -p fastcord-discord -p fastcord-app --features fastcord-app/fake-discord --all-targets --locked -- -D warnings
