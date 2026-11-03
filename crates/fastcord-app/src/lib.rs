@@ -1709,6 +1709,14 @@ impl App {
             fake::Step::Toggle(panel) => {
                 let message = match panel {
                     "search" => Message::Search(search::Event::Toggle),
+                    "discover" => Message::Discover(discover::Event::Toggle),
+                    "discover-filter" => {
+                        Message::Discover(discover::Event::Query("SYNTHETIC".into()))
+                    }
+                    "discover-no-match" => {
+                        Message::Discover(discover::Event::Query("no matching server".into()))
+                    }
+                    "discover-clear" => Message::Discover(discover::Event::Query(String::new())),
                     "pins" => Message::Pins(pins::Event::Toggle),
                     "thread-archive" => {
                         let Some(selection) = self

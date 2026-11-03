@@ -1,5 +1,22 @@
 # Testing
 
+## Loaded discovery filter (#90, 2026-11-02)
+
+- Offline regressions cover Unicode lowercase matching in names/descriptions,
+  original order after clearing, the 100-character/400-byte query bound,
+  filtered icon demand, and account reset rejecting old pages. Query events
+  return no tasks before/during/after loading; only an explicit Show more
+  fetches another page, using the unfiltered offset. An iced widget test checks
+  Show more remains clickable with no matches.
+- The fake server exposes a read-only two-server discovery fixture without
+  remote icons; fake script steps `discover`, `discover-filter`,
+  `discover-no-match`, and `discover-clear` drive the actual app handlers.
+- Linux local checks passed: all eight `discover::tests`, the fake discovery
+  fixture test, and app/fake all-target Clippy with warnings denied. Native
+  screenshots of this change are pending a rebuilt fake-mode executable.
+  Global search/direct discovery joining, real user-account route acceptance,
+  and Windows/macOS native acceptance remain outstanding.
+
 ## Stranger friend-request confirmation (#211, 2026-10-25)
 
 - Offline coverage: the relationship request tests check plain acceptance,
@@ -1308,4 +1325,3 @@ lip-sync and native device latency acceptance remain separate checks.
 ### Reconnect while volume persistence is blocked (#233)
 
 `repeated_manual_reconnect_keeps_pending_mute_while_persistence_is_blocked` seeds an isolated temporary CSV at 100%, holds the actual persistence mutex through a thread handshake, performs 3,216 slider changes and sixteen actual App manual reconnects ending at 0%, and merges the stale disk snapshot into each replacement bridge. It checks retained writer thread/status ownership, zero before/after the real flush and another reconnect, and old-account status rejection after teardown/re-entry. Returned network/subscription tasks are dropped; no account credentials or API requests are used. A thirty-second watchdog only releases a regressed blocking path so it reports failure instead of hanging.
-
