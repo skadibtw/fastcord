@@ -66,7 +66,7 @@ fn draft() -> EventDraft {
         location: String::new(),
         start_ms: 2_000_000_000_000,
         end_ms: None,
-        recurrence: None,
+        recurrence: EventRecurrenceChange::Keep,
     }
 }
 
@@ -242,11 +242,11 @@ fn an_event_the_creator_owns_can_be_managed_with_create_events_alone() {
 }
 
 #[test]
-fn weekly_creation_uses_the_resolved_utc_weekday_and_edits_preserve_server_rules() {
+fn recurrence_replacement_uses_the_resolved_utc_weekday_for_creation_and_edits() {
     let mut value = draft();
     //2026-11-02 00:30 UTC: Monday, even where the local date is still Sunday.
     value.start_ms = 1_793_579_400_000;
-    value.recurrence = Some(EventRecurrence::Weekly);
+    value.recurrence = EventRecurrenceChange::Replace(EventRecurrence::Weekly);
     let body = value.body(false);
     assert_eq!(body["recurrence_rule"]["frequency"], 2);
     assert_eq!(body["recurrence_rule"]["interval"], 1);
@@ -255,12 +255,66 @@ fn weekly_creation_uses_the_resolved_utc_weekday_and_edits_preserve_server_rules
         body["recurrence_rule"]["start"],
         body["scheduled_start_time"]
     );
-    value.recurrence = Some(EventRecurrence::EveryOtherWeek);
+    value.recurrence = EventRecurrenceChange::Replace(EventRecurrence::EveryOtherWeek);
     assert_eq!(value.body(false)["recurrence_rule"]["interval"], 2);
-    assert!(value.body(true).get("recurrence_rule").is_none());
+    assert_eq!(
+        value.body(true)["recurrence_rule"],
+        value.body(false)["recurrence_rule"]
+    );
     let create = request(id(GUILD), &EventAction::Create(value.clone())).unwrap();
     assert_eq!(create.write_group(), crate::WriteGroup::ScheduledEvents);
     assert!(!crate::WriteGroup::ScheduledEvents.default_on());
     value.start_ms = u64::MAX;
     assert_eq!(value.check(0, true), Err(DraftError::Start));
+}
+
+#[test]
+fn recurrence_patch_intent_distinguishes_omit_null_and_supported_replacement() {
+    let mut value = draft();
+    value.name = "Renamed complex series".into();
+    for start_ms in [value.start_ms, value.start_ms + 86_400_000] {
+        value.start_ms = start_ms;
+        // Keep makes no claim about server-side reanchoring after a start edit.
+        value.recurrence = EventRecurrenceChange::Keep;
+        let action = EventAction::Edit(id(900), value.clone());
+        let request = request(id(GUILD), &action).unwrap();
+        assert_eq!(request.write_group(), crate::WriteGroup::ScheduledEvents);
+        let body = path(&action).2.unwrap();
+        assert!(body.get("recurrence_rule").is_none());
+        assert_eq!(body["name"], "Renamed complex series");
+        assert_eq!(body["scheduled_start_time"], iso8601(start_ms / 1000));
+    }
+    value.recurrence = EventRecurrenceChange::Clear;
+    let body = path(&EventAction::Edit(id(900), value.clone())).2.unwrap();
+    assert_eq!(body.get("recurrence_rule"), Some(&Value::Null));
+    assert!(value.body(false).get("recurrence_rule").is_none());
+    value.recurrence = EventRecurrenceChange::Replace(EventRecurrence::Weekly);
+    let action = EventAction::Edit(id(900), value.clone());
+    let replace = request(id(GUILD), &action).unwrap();
+    let body = path(&action).2.unwrap();
+    assert_eq!(
+        body["recurrence_rule"]["start"],
+        body["scheduled_start_time"]
+    );
+    assert_eq!(body["recurrence_rule"]["interval"], 1);
+    assert!(body["recurrence_rule"].get("count").is_none());
+    assert!(body["recurrence_rule"].get("end").is_none());
+    assert_eq!(replace.write_group(), crate::WriteGroup::ScheduledEvents);
+}
+
+#[test]
+fn recurrence_replacement_keeps_existing_permission_and_status_checks() {
+    let mut store = store(Permissions::MANAGE_EVENTS.0, false);
+    let mut value = draft();
+    value.recurrence = EventRecurrenceChange::Replace(EventRecurrence::EveryOtherWeek);
+    let action = EventAction::Edit(id(900), value);
+    assert!(store.event_allows(id(GUILD), &action));
+    apply(
+        &mut store,
+        "GUILD_ROLE_UPDATE",
+        json!({"guild_id": GUILD.to_string(),
+        "role": {"id": GUILD.to_string(), "name":"e", "permissions":"0"}}),
+    );
+    assert!(!store.event_allows(id(GUILD), &action));
+    assert!(!store.event_allows(id(GUILD + 1), &action));
 }

@@ -793,50 +793,6 @@ fn leaving_or_losing_access_aborts_the_actual_attendee_task_before_reopening() {
 }
 
 #[test]
-fn recurrence_creation_is_explicit_and_never_changes_an_existing_series() {
-    let (mut state, bridge) = (State::default(), NavigationBridge::new());
-    let nav = nav(vec![], true);
-    open(&mut state, &nav, &bridge);
-    let _ = state.update(Event::New, &nav, &client(), &bridge);
-    let _ = state.update(
-        Event::Repeat(Some(EventRecurrence::EveryOtherWeek)),
-        &nav,
-        &client(),
-        &bridge,
-    );
-    let Screen::Form(form) = &mut state.screen else {
-        panic!("new form")
-    };
-    form.name = "Weekly meeting".into();
-    form.channel = Some(Snowflake(200));
-    form.start = "2040-01-01 12:00".into();
-    assert_eq!(
-        draft_of(form).unwrap().recurrence,
-        Some(EventRecurrence::EveryOtherWeek)
-    );
-    form.editing = Some((Snowflake(1), FUTURE));
-    let _ = state.update(
-        Event::Repeat(Some(EventRecurrence::Weekly)),
-        &nav,
-        &client(),
-        &bridge,
-    );
-    let Screen::Form(form) = &state.screen else {
-        panic!("edit form")
-    };
-    assert_eq!(
-        form.recurrence,
-        Some(EventRecurrence::EveryOtherWeek),
-        "existing series ignores recurrence controls"
-    );
-    assert_eq!(
-        draft_of(form).unwrap().recurrence,
-        None,
-        "existing series never sends rule changes"
-    );
-}
-
-#[test]
 fn real_event_widget_tree_survives_detail_and_attendee_page_transitions() {
     use crate::variable_list::harness::Ui;
     let nav = nav(
@@ -967,7 +923,7 @@ fn editing_keeps_displayed_instants_when_current_timezone_differs() {
         editing: Some((Snowflake(1), start)),
         original_end: Some(end),
         original_civil: Some((start_text.clone(), end_text.clone())),
-        recurrence: None,
+        recurrence: EventRecurrenceChange::Keep,
         name: "Renamed".into(),
         description: String::new(),
         kind: EventKind::Voice,
@@ -1160,4 +1116,227 @@ fn auth_rejection_requires_owned_attendee_or_write_completion() {
     let _ = state.update(late, &nav, &client, &bridge);
     assert_eq!(state.pending, current);
     assert!(state.notice.is_none());
+}
+
+fn recurrence_form() -> Form {
+    let start = parse_local("2040-01-01 12:00", UtcOffset::UTC).unwrap();
+    let start_text = format_local(start, UtcOffset::UTC);
+    Form {
+        editing: Some((Snowflake(1), start)),
+        original_end: None,
+        original_civil: Some((start_text.clone(), String::new())),
+        recurrence: EventRecurrenceChange::Keep,
+        name: "Series".into(),
+        description: String::new(),
+        kind: EventKind::Voice,
+        channel: Some(Snowflake(200)),
+        location: String::new(),
+        start: start_text,
+        end: String::new(),
+        error: None,
+    }
+}
+
+#[test]
+fn recurrence_editor_defaults_to_keep_for_complex_series_and_changes_only_explicitly() {
+    // This fixture consumes the global worker-published timezone offsets.
+    // Other account tests may reset them, so keep the real edit path isolated.
+    if std::env::var_os("FASTCORD_EVENT_RECURRENCE_EDIT_FIXTURE").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "scheduled_events::tests::recurrence_editor_defaults_to_keep_for_complex_series_and_changes_only_explicitly",
+                "--nocapture",
+            ])
+            .env("FASTCORD_EVENT_RECURRENCE_EDIT_FIXTURE", "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated recurrence-edit regression failed"
+        );
+        return;
+    }
+    let (mut state, bridge) = (State::default(), NavigationBridge::new());
+    let series: ScheduledEvent = serde_json::from_value(serde_json::json!({
+        "id":"1", "guild_id":"100", "channel_id":"200", "creator_id":"9",
+        "name":"Complex series", "scheduled_start_time":"2096-10-02T07:06:40Z",
+        "status":1, "entity_type":2,
+        "recurrence_rule": {"start":"2096-10-02T07:06:40Z", "frequency":1,
+            "interval":1, "by_n_weekday":[{"n":2,"day":0}], "count":5,
+            "end":"2097-10-01T00:00:00Z", "future_extension":{"preserve":true}}
+    }))
+    .unwrap();
+    assert_eq!(series.start_ms, FUTURE);
+    assert!(
+        series
+            .recurrence
+            .as_ref()
+            .is_some_and(|rule| rule.contains("month"))
+    );
+    let nav = nav(vec![series], true);
+    TimeCache::new().prepare(&nav.events);
+    if fastcord_platform::timezone::supported() {
+        assert!(offset_for(nav.events[0].start_ms).is_some());
+    }
+    open(&mut state, &nav, &bridge);
+    let _ = state.update(Event::Edit(Snowflake(1)), &nav, &client(), &bridge);
+    let _ = state.update(
+        Event::Input(Field::Name, "Renamed series".into()),
+        &nav,
+        &client(),
+        &bridge,
+    );
+    let Screen::Form(form) = &state.screen else {
+        panic!("existing series form")
+    };
+    assert_eq!(
+        draft_of(form).unwrap().recurrence,
+        EventRecurrenceChange::Keep
+    );
+    for intent in [
+        EventRecurrenceChange::Clear,
+        EventRecurrenceChange::Replace(EventRecurrence::Weekly),
+        EventRecurrenceChange::Replace(EventRecurrence::EveryOtherWeek),
+        EventRecurrenceChange::Keep,
+    ] {
+        let task = state.update(Event::Repeat(intent), &nav, &client(), &bridge);
+        assert_eq!(task.units(), 0, "choosing recurrence does not write");
+        let Screen::Form(form) = &state.screen else {
+            panic!("form")
+        };
+        let draft = draft_of(form).unwrap();
+        assert_eq!(draft.recurrence, intent);
+        assert_eq!(
+            draft.start_ms, FUTURE,
+            "unchanged displayed time preserves instant"
+        );
+    }
+    let _ = state.update(Event::Close, &nav, &client(), &bridge);
+    let _ = state.update(
+        Event::Repeat(EventRecurrenceChange::Clear),
+        &nav,
+        &client(),
+        &bridge,
+    );
+    assert!(matches!(state.screen, Screen::List));
+    state.clear();
+    assert!(matches!(state.screen, Screen::List));
+}
+
+#[test]
+fn recurrence_controls_recheck_permissions_owner_status_and_pending_write() {
+    let bridge = NavigationBridge::new();
+    let original = nav(
+        vec![event(1, EventStatus::Scheduled, EventKind::Voice, FUTURE)],
+        true,
+    );
+    for case in 0..5 {
+        let mut nav = original.clone();
+        let mut state = State {
+            guild: Some(guild()),
+            screen: Screen::Form(Box::new(recurrence_form())),
+            ..State::default()
+        };
+        match case {
+            0 => nav.event_permissions = EventPermissions::default(),
+            1 => nav.selected_guild = Some(Snowflake(999)),
+            2 => nav.events[0].status = EventStatus::Canceled,
+            3 => nav.events.clear(),
+            _ => state.pending = Some(7),
+        }
+        let _ = state.update(
+            Event::Repeat(EventRecurrenceChange::Clear),
+            &nav,
+            &client(),
+            &bridge,
+        );
+        let Screen::Form(form) = &state.screen else {
+            panic!("form")
+        };
+        assert_eq!(
+            form.recurrence,
+            EventRecurrenceChange::Keep,
+            "blocked case {case}"
+        );
+    }
+}
+
+#[test]
+fn recurrence_creation_is_explicit_and_changed_start_keep_stays_keep() {
+    let bridge = NavigationBridge::new();
+    let nav = nav(vec![], true);
+    let mut state = State {
+        guild: Some(guild()),
+        ..State::default()
+    };
+    let _ = state.update(Event::New, &nav, &client(), &bridge);
+    let Screen::Form(form) = &state.screen else {
+        panic!("new form")
+    };
+    assert_eq!(form.recurrence, EventRecurrenceChange::Clear);
+    let choice = EventRecurrenceChange::Replace(EventRecurrence::EveryOtherWeek);
+    let _ = state.update(Event::Repeat(choice), &nav, &client(), &bridge);
+    let Screen::Form(form) = &state.screen else {
+        panic!("new form")
+    };
+    assert_eq!(form.recurrence, choice);
+    let mut form = recurrence_form();
+    form.start = "2040-01-03 12:00".into();
+    assert_eq!(
+        draft_of(&form).unwrap().recurrence,
+        EventRecurrenceChange::Keep
+    );
+    form.recurrence = choice;
+    assert_eq!(draft_of(&form).unwrap().recurrence, choice);
+}
+
+#[test]
+fn real_recurrence_buttons_emit_each_intent_and_disable_when_locked() {
+    use crate::variable_list::harness::Ui;
+    let nav = nav(
+        vec![event(1, EventStatus::Scheduled, EventKind::Voice, FUTURE)],
+        true,
+    );
+    let form = recurrence_form();
+    for busy in [false, true] {
+        let mut ui = Ui::new(700.0, 300.0, recurrence_controls(&form, &nav, busy));
+        ui.draw();
+        let mut choices = Vec::new();
+        for y in (0..200).step_by(8) {
+            for x in (8..690).step_by(16) {
+                for event in ui.click(x as f32, y as f32) {
+                    if let Event::Repeat(intent) = event
+                        && !choices.contains(&intent)
+                    {
+                        choices.push(intent);
+                    }
+                }
+            }
+        }
+        if busy {
+            assert!(choices.is_empty());
+        } else {
+            assert_eq!(choices.len(), 4);
+            assert!(choices.contains(&EventRecurrenceChange::Keep));
+            assert!(choices.contains(&EventRecurrenceChange::Clear));
+            assert!(choices.contains(&EventRecurrenceChange::Replace(EventRecurrence::Weekly)));
+            assert!(choices.contains(&EventRecurrenceChange::Replace(
+                EventRecurrence::EveryOtherWeek
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn recurrence_edit_does_not_enable_scheduled_events_network_writes() {
+    let mut form = recurrence_form();
+    form.recurrence = EventRecurrenceChange::Replace(EventRecurrence::Weekly);
+    let action = EventAction::Edit(Snowflake(1), draft_of(&form).unwrap());
+    assert!(matches!(
+        client().scheduled_event_action(guild(), &action).await,
+        Err(RestError::WriteNotVerified(
+            fastcord_discord::WriteGroup::ScheduledEvents
+        ))
+    ));
 }

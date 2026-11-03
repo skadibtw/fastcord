@@ -19,7 +19,7 @@ use crate::{Clock, Priority, RestClient, RestError, RestRequest, Route, iso8601}
 /// A list body larger than this is not parsed at all.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Supported creation presets. Existing event edits never send a recurrence rule.
+/// Supported whole-series presets, anchored to the resolved UTC start instant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventRecurrence {
     Weekly,
@@ -39,6 +39,17 @@ impl EventRecurrence {
     }
 }
 
+/// Explicit recurrence intent. Keeping a rule omits it entirely, including any
+/// server fields or complex rule this client cannot edit. Clearing sends null
+/// only on an existing event; replacement always generates a supported preset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EventRecurrenceChange {
+    #[default]
+    Keep,
+    Clear,
+    Replace(EventRecurrence),
+}
+
 /// What the user typed for a created or edited event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventDraft {
@@ -51,8 +62,8 @@ pub struct EventDraft {
     pub location: String,
     pub start_ms: u64,
     pub end_ms: Option<u64>,
-    /// Creation only; omitted for all existing-event edits.
-    pub recurrence: Option<EventRecurrence>,
+    /// Keep/clear/replace the whole series; never a per-occurrence exception.
+    pub recurrence: EventRecurrenceChange,
 }
 
 /// Why a draft is not sent.
@@ -107,9 +118,8 @@ impl EventDraft {
                 }
             }
         }
-        if self
-            .recurrence
-            .is_some_and(|rule| rule.body(self.start_ms).is_none())
+        if let EventRecurrenceChange::Replace(rule) = self.recurrence
+            && rule.body(self.start_ms).is_none()
         {
             return Err(DraftError::Start);
         }
@@ -134,8 +144,17 @@ impl EventDraft {
             "privacy_level": 2,
         });
         let object = body.as_object_mut().expect("an object");
-        if !edit && let Some(rule) = self.recurrence.and_then(|rule| rule.body(self.start_ms)) {
-            object.insert("recurrence_rule".into(), rule);
+        match self.recurrence {
+            EventRecurrenceChange::Keep => {}
+            EventRecurrenceChange::Clear if edit => {
+                object.insert("recurrence_rule".into(), Value::Null);
+            }
+            EventRecurrenceChange::Clear => {}
+            EventRecurrenceChange::Replace(rule) => {
+                if let Some(rule) = rule.body(self.start_ms) {
+                    object.insert("recurrence_rule".into(), rule);
+                }
+            }
         }
         let description = self.description.trim();
         if !description.is_empty() {

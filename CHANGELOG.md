@@ -18,6 +18,9 @@
 - Preserve unfinished multi-select answers when reactions or unrelated message fields change; invalidate the draft when its component tree changes or the row becomes hidden, pending, deleted or leaves the conversation (#235).
 - Give each scheduled-event list request distinct ownership and cancel it on close/reopen/reset; ignore stale list, attendee and write authentication failures while preserving in-flight write deduplication (#237).
 - Add bounded same-server custom emoji selection and explicit clearing to onboarding answers, rechecking ownership and permissions while preserving unavailable existing emoji and unknown nested fields (#97).
+
+- Isolate scheduled-event cache fixtures from parallel account resets without changing runtime timezone behavior (#254).
+- Allow explicit whole-series recurrence changes when editing an event: keep the current rule, stop repetition, or choose weekly/every-other-week UTC; preserve unknown rules by default and keep writes gated (#92).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.

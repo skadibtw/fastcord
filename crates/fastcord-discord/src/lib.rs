@@ -178,7 +178,7 @@ pub use role_admin::{MAX_OVERWRITES, MAX_ROLE_COLOR, MAX_ROLE_NAME_CHARS, RoleEd
 pub use route::{MajorParameter, Route, RouteKey};
 pub use scheduled_event::{
     DraftError, EVENT_USERS_PAGE, EventAction, EventDraft, EventPermissions, EventRecurrence,
-    EventUser, EventUsers,
+    EventRecurrenceChange, EventUser, EventUsers,
 };
 pub use search::{
     MAX_SEARCH_CHARS, MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE, SearchHas, SearchOutcome, SearchPage,

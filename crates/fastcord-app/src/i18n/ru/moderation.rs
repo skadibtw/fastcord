@@ -713,4 +713,21 @@ pub const ENTRIES: &[(&str, &str)] = &[
         "Окончание: ГГГГ-ММ-ДД ЧЧ:ММ (необязательно)",
     ),
     ("Edit event", "Изменить событие"),
+    ("Once", "Однократно"),
+    ("Weekly (UTC)", "Еженедельно (UTC)"),
+    ("Every other week (UTC)", "Раз в две недели (UTC)"),
+    ("Keep current repeat", "Сохранить текущее повторение"),
+    ("Current repeat: {}", "Текущее повторение: {}"),
+    (
+        "Repeat changes apply to the whole series.",
+        "Изменения повторения применяются ко всей серии.",
+    ),
+    (
+        "This replaces the current repeat rule for the entire event series.",
+        "Это заменит текущее правило повторения для всей серии событий.",
+    ),
+    (
+        "Repeats at the same UTC time and weekday as the first occurrence. Local times may shift when daylight saving time changes.",
+        "Повторяется в то же время UTC и день недели, что и первое событие. Местное время может сместиться при переходе на летнее или зимнее время.",
+    ),
 ];

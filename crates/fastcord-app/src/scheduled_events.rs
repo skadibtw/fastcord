@@ -15,7 +15,8 @@
 use crate::ui::{button, primary_button};
 use fastcord_discord::state::navigation::{ChannelKind, NavigationSnapshot};
 use fastcord_discord::{
-    DraftError, EventAction, EventDraft, EventRecurrence, RestClient, RestError,
+    DraftError, EventAction, EventDraft, EventRecurrence, EventRecurrenceChange, RestClient,
+    RestError,
 };
 use fastcord_model::markup::TimeStyle;
 use fastcord_model::{
@@ -92,7 +93,7 @@ pub enum Event {
     Edit(Snowflake),
     Input(Field, String),
     Kind(EventKind),
-    Repeat(Option<EventRecurrence>),
+    Repeat(EventRecurrenceChange),
     Channel(Choice),
     Save,
     Prepared(u64, Snowflake, Result<EventAction, String>),
@@ -107,7 +108,7 @@ struct Form {
     editing: Option<(Snowflake, u64)>,
     original_end: Option<u64>,
     original_civil: Option<(String, String)>,
-    recurrence: Option<EventRecurrence>,
+    recurrence: EventRecurrenceChange,
     name: String,
     description: String,
     kind: EventKind,
@@ -488,7 +489,7 @@ fn draft_of(form: &Form) -> Result<EventDraft, String> {
         location: form.location.clone(),
         start_ms: start,
         end_ms: end,
-        recurrence: form.editing.is_none().then_some(form.recurrence).flatten(),
+        recurrence: form.recurrence,
     };
     // A new event, or an edit that moves the start, must start in the future.
     // (The form shows minutes only.)
@@ -766,7 +767,7 @@ impl State {
                         editing: None,
                         original_end: None,
                         original_civil: None,
-                        recurrence: None,
+                        recurrence: EventRecurrenceChange::Clear,
                         name: String::new(),
                         description: String::new(),
                         kind: EventKind::Voice,
@@ -804,7 +805,7 @@ impl State {
                         editing: Some((id, event.start_ms)),
                         original_end: event.end_ms,
                         original_civil: Some((start.clone(), end.clone())),
-                        recurrence: None,
+                        recurrence: EventRecurrenceChange::Keep,
                         name: event.name.clone(),
                         description: event.description.clone(),
                         kind: event.kind,
@@ -837,7 +838,8 @@ impl State {
             Event::Repeat(recurrence) => {
                 if let Screen::Form(form) = &mut self.screen
                     && self.pending.is_none()
-                    && form.editing.is_none()
+                    && self.guild == navigation.selected_guild
+                    && recurrence_editable(form, navigation)
                 {
                     form.recurrence = recurrence;
                     form.error = None;
@@ -1363,31 +1365,7 @@ fn form_body<'a>(
             &form.end,
             Field::End,
         ));
-    if form.editing.is_none() {
-        let mut choices = row![].spacing(6);
-        for (label, recurrence) in [
-            ("Once", None),
-            ("Weekly (UTC)", Some(EventRecurrence::Weekly)),
-            (
-                "Every other week (UTC)",
-                Some(EventRecurrence::EveryOtherWeek),
-            ),
-        ] {
-            choices = choices.push(
-                button(text(tr(label)).size(12))
-                    .style(if form.recurrence == recurrence {
-                        button::primary
-                    } else {
-                        button::secondary
-                    })
-                    .on_press_maybe((!busy).then_some(Event::Repeat(recurrence))),
-            );
-        }
-        out = out.push(choices);
-        if form.recurrence.is_some() {
-            out = out.push(text(tr("Repeats at the same UTC time and weekday as the first occurrence. Local times may shift when daylight saving time changes.")).size(12));
-        }
-    }
+    out = out.push(recurrence_controls(form, navigation, busy));
     if let Some(error) = &form.error {
         out = out.push(text(error.as_str()).size(12).style(text::danger));
     }
@@ -1407,6 +1385,70 @@ fn form_body<'a>(
         .spacing(6),
     )
     .into()
+}
+
+/// Recurrence controls change the whole series, never an individual occurrence.
+fn recurrence_editable(form: &Form, navigation: &NavigationSnapshot) -> bool {
+    match form.editing {
+        Some((id, _)) => find(navigation, id).is_some_and(|event| {
+            navigation.selected_guild == Some(event.guild_id)
+                && !event.status.is_over()
+                && manages(navigation, event)
+        }),
+        None => navigation.event_permissions.manage || navigation.event_permissions.create,
+    }
+}
+
+fn recurrence_controls<'a>(
+    form: &'a Form,
+    navigation: &'a NavigationSnapshot,
+    busy: bool,
+) -> Element<'a, Event> {
+    let editable = !busy && recurrence_editable(form, navigation);
+    let choice = |label: &'static str, recurrence| {
+        button(text(tr(label)).size(12))
+            .style(if form.recurrence == recurrence {
+                button::primary
+            } else {
+                button::secondary
+            })
+            .on_press_maybe(editable.then_some(Event::Repeat(recurrence)))
+    };
+    let mut out = column![].spacing(6);
+    if let Some((id, _)) = form.editing {
+        out = out.push(text(tr("Repeat changes apply to the whole series.")).size(12));
+        if let Some(event) = find(navigation, id) {
+            let rule = event.recurrence.as_deref().unwrap_or_else(|| tr("Once"));
+            out = out.push(text(trf("Current repeat: {}", &[&rule])).size(12));
+        }
+        out = out.push(choice("Keep current repeat", EventRecurrenceChange::Keep));
+    }
+    out = out.push(
+        row![
+            choice("Once", EventRecurrenceChange::Clear),
+            choice(
+                "Weekly (UTC)",
+                EventRecurrenceChange::Replace(EventRecurrence::Weekly)
+            ),
+            choice(
+                "Every other week (UTC)",
+                EventRecurrenceChange::Replace(EventRecurrence::EveryOtherWeek)
+            ),
+        ]
+        .spacing(6),
+    );
+    if matches!(form.recurrence, EventRecurrenceChange::Replace(_)) {
+        out = out.push(text(tr("Repeats at the same UTC time and weekday as the first occurrence. Local times may shift when daylight saving time changes.")).size(12));
+    }
+    if form.editing.is_some() && form.recurrence != EventRecurrenceChange::Keep {
+        out = out.push(
+            text(tr(
+                "This replaces the current repeat rule for the entire event series.",
+            ))
+            .size(12),
+        );
+    }
+    out.into()
 }
 
 #[cfg(test)]
