@@ -5536,6 +5536,7 @@ mod bridge_tests {
                 channel,
                 panel.component_choices,
                 None,
+                None,
             ),
         );
         ui.redraw();
