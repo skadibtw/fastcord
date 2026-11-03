@@ -36,6 +36,9 @@ pub enum DeepLink {
 /// `discord://-/invite/{code}`, `https://discord.com/channels/...` (also the
 /// PTB and Canary hosts) or an invite link. Nothing is fetched to resolve it.
 pub fn parse(text: &str) -> Option<DeepLink> {
+    if text.starts_with("fastcord:") {
+        return app_link(text);
+    }
     let text = text.trim();
     if text.is_empty() || text.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
@@ -80,6 +83,61 @@ pub fn parse(text: &str) -> Option<DeepLink> {
         channel,
         message: message.flatten(),
     })
+}
+
+/// App-owned URLs have a deliberately strict grammar, unlike legacy pasted
+/// web links: no query, fragment, escaping, whitespace or extra actions.
+fn app_link(text: &str) -> Option<DeepLink> {
+    if text.len() > 2048 || !text.is_ascii() {
+        return None;
+    }
+    let path = text.strip_prefix("fastcord://-/")?;
+    if let Some(code) = path.strip_prefix("invite/") {
+        return ((2..=32).contains(&code.len())
+            && code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))
+        .then(|| DeepLink::Invite(code.to_owned()));
+    }
+    let mut parts = path.split('/');
+    if parts.next()? != "channels" {
+        return None;
+    }
+    let guild = match parts.next()? {
+        "@me" => None,
+        part => Some(message_link::id(part)?),
+    };
+    let channel = message_link::id(parts.next()?)?;
+    let message = parts.next().map(message_link::id);
+    if parts.next().is_some() || message == Some(None) {
+        return None;
+    }
+    Some(DeepLink::Channel {
+        guild,
+        channel,
+        message: message.flatten(),
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LinkLaunch {
+    Ordinary,
+    Open(String),
+    Invalid,
+}
+
+/// Inspect the registered launch envelope before any other CLI flag handling.
+/// A quote injected by the OS/browser can create extra argv entries, but those
+/// entries must never enable helper, preview, account or fake modes.
+pub(crate) fn link_launch(mut args: impl Iterator<Item = std::ffi::OsString>) -> LinkLaunch {
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--open-url")) {
+        return LinkLaunch::Ordinary;
+    }
+    let Some(url) = args.next().and_then(|s| s.into_string().ok()) else {
+        return LinkLaunch::Invalid;
+    };
+    if args.next().is_some() || app_link(&url).is_none() {
+        return LinkLaunch::Invalid;
+    }
+    LinkLaunch::Open(url)
 }
 
 fn invite(text: &str) -> Option<DeepLink> {
@@ -183,6 +241,7 @@ pub fn view<'a>(
     close_to_tray: bool,
     tray: &Result<(), String>,
     autostart: Option<bool>,
+    links: &'a crate::link_registration::State,
 ) -> Element<'a, Message> {
     let mut content = column![text(tr("Desktop")).size(18)].spacing(8);
     content = content.push(
@@ -211,7 +270,7 @@ pub fn view<'a>(
                 .on_toggle(Message::AutostartToggled),
         );
     }
-    content.into()
+    content.push(links.view()).into()
 }
 
 /// Whether the window runs on Wayland, which gives applications no way to keep
@@ -418,6 +477,49 @@ mod tests {
         ] {
             assert_eq!(parse(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn registered_url_envelope_rejects_extra_flags_before_launch_dispatch() {
+        let launch = |args: &[&str]| link_launch(args.iter().map(std::ffi::OsString::from));
+        for url in [
+            "fastcord://-/channels/1/2/3",
+            "fastcord://-/channels/@me/2",
+            "fastcord://-/invite/AbC-123",
+        ] {
+            assert!(matches!(launch(&["--open-url", url]), LinkLaunch::Open(_)));
+            for flag in [
+                "--packet-helper",
+                "--network-check",
+                "--alerts-preview",
+                "--fake-discord",
+            ] {
+                assert_eq!(launch(&["--open-url", url, flag]), LinkLaunch::Invalid);
+            }
+        }
+        for url in [
+            "discord://-/channels/1/2",
+            "fastcord://-/invite/Ab%22",
+            "fastcord://-/invite/Ab/extra",
+            "fastcord://-/invite/A",
+            "fastcord://-/channels/1/2?ack=1",
+            "fastcord://-/channels/1/2#reply",
+            "fastcord://-/channels/1/2/",
+            "fastcord://-/channels/1/2\"",
+            "fastcord://-/channels/0/2",
+            "fastcord://evil/channels/1/2",
+            "fastcord://-/ack/1/2",
+            "fastcord://-/channels/1/2\n",
+        ] {
+            assert_eq!(launch(&["--open-url", url]), LinkLaunch::Invalid, "{url:?}");
+        }
+        assert_eq!(launch(&["--open-url"]), LinkLaunch::Invalid);
+        assert_eq!(
+            launch(&["--open-url", &"a".repeat(2049)]),
+            LinkLaunch::Invalid
+        );
+        assert_eq!(launch(&["--alerts-preview"]), LinkLaunch::Ordinary);
+        assert_eq!(launch(&["discord://-/channels/1/2"]), LinkLaunch::Ordinary);
     }
 
     #[test]

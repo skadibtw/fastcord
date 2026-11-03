@@ -78,6 +78,7 @@ impl App {
                     self.audio_preferences.close_to_tray,
                     &self.tray,
                     self.autostart,
+                    &self.link_registration,
                 ),
                 audio_devices::experimental(&self.audio_preferences),
                 unverified::view(

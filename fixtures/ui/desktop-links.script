@@ -1,0 +1,17 @@
+wait 2
+open fastcord://-/channels/5001/6005
+wait 1
+snap links-channel
+toggle app
+toggle links-pending
+snap links-pending
+toggle links-conflict
+snap links-conflict
+toggle links-register
+wait 0.2
+snap links-simulated-success
+toggle escape
+open fastcord://-/invite/fakeinvite
+wait 1
+snap links-invite-preview
+quit
