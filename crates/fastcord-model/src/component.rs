@@ -94,6 +94,8 @@ pub enum Component {
         body: Vec<Component>,
         accent: Option<u32>,
     },
+    /// Hidden container: descendants are discarded before publication.
+    HiddenSpoiler,
     /// Type 14.
     Separator,
     /// Anything else (thumbnails, galleries, files, unknown types), by type.
@@ -286,12 +288,16 @@ fn parse(value: &Value, depth: usize, left: &mut usize) -> Option<Component> {
                 .and_then(|accessory| parse(accessory, depth + 1, left))
                 .map(Box::new),
         },
+        17 if !matches!(value.get("spoiler"), None | Some(Value::Bool(false))) => {
+            Component::HiddenSpoiler
+        }
         17 => Component::Container {
             body: children(value, "components", depth + 1, left),
             accent: value
                 .get("accent_color")
                 .and_then(Value::as_u64)
-                .and_then(|c| u32::try_from(c).ok()),
+                .filter(|c| *c <= 0xFF_FFFF)
+                .map(|c| c as u32),
         },
         14 => Component::Separator,
         other => Component::Unsupported(other),
@@ -356,7 +362,7 @@ impl Component {
                         .sum::<usize>()
             }
             Self::Text(text) => text.capacity(),
-            Self::Separator | Self::Unsupported(_) => 0,
+            Self::HiddenSpoiler | Self::Separator | Self::Unsupported(_) => 0,
         }
     }
 
@@ -392,7 +398,7 @@ impl Component {
                 }
             }
             Self::Text(text) => text.shrink_to_fit(),
-            Self::Separator | Self::Unsupported(_) => {}
+            Self::HiddenSpoiler | Self::Separator | Self::Unsupported(_) => {}
         }
     }
 
@@ -496,6 +502,71 @@ mod tests {
             Some(Component::Select(s)) if s.kind == 6
         ));
         assert!(Component::find(&list, "missing").is_none());
+    }
+
+    #[test]
+    fn container_spoilers_discard_descendants_and_invalid_flags_fail_closed() {
+        for spoiler in [
+            json!(true),
+            json!(null),
+            json!("false"),
+            json!(0),
+            json!({}),
+        ] {
+            let mut list = parsed(json!([{"type":17,"spoiler":spoiler,"components":[
+                {"type":10,"content":"private text"},
+                {"type":17,"components":[{"type":2,"style":1,"custom_id":"hidden","label":"private button"}]},
+                {"type":6,"custom_id":"hidden-select"}
+            ]}]));
+            assert!(matches!(list.as_slice(), [Component::HiddenSpoiler]));
+            assert_eq!(
+                list[0].heap_bytes(),
+                0,
+                "no descendant strings or actions retained"
+            );
+            assert!(Component::find(&list, "hidden").is_none());
+            assert!(Component::find(&list, "hidden-select").is_none());
+            compact_components(&mut list);
+            assert_eq!(list[0].heap_bytes(), 0);
+        }
+        let list = parsed(json!([{"type":17,"components":[
+            {"type":17,"spoiler":true,"components":[{"type":10,"content":"secret"}]},
+            {"type":17,"spoiler":false,"components":[{"type":2,"style":1,"custom_id":"visible","label":"Visible"}]}
+        ]}]));
+        assert!(Component::find(&list, "visible").is_some());
+        let Component::Container { body, .. } = &list[0] else {
+            panic!()
+        };
+        assert!(matches!(body[0], Component::HiddenSpoiler));
+        assert!(matches!(&body[1], Component::Container { body, .. } if body.len()==1));
+        let list = parsed(json!(
+            (0..MAX_COMPONENTS + 8)
+                .map(|_| json!({"type":17,"spoiler":true}))
+                .collect::<Vec<_>>()
+        ));
+        assert_eq!(list.len(), MAX_COMPONENTS);
+    }
+
+    #[test]
+    fn container_accents_accept_only_optional_24_bit_rgb() {
+        for (wire, expected) in [
+            (json!(0), Some(0)),
+            (json!(0xFFFFFF), Some(0xFFFFFF)),
+            (json!(0x123456), Some(0x123456)),
+            (json!(null), None),
+            (json!(-1), None),
+            (json!(0x1000000u64), None),
+            (json!(4294967296u64), None),
+            (json!("255"), None),
+            (json!(1.5), None),
+        ] {
+            let list = parsed(json!([{"type":17,"accent_color":wire,"components":[]} ]));
+            assert!(matches!(&list[0], Component::Container { accent, .. } if *accent == expected));
+        }
+        assert!(matches!(
+            &parsed(json!([{"type":17}]))[0],
+            Component::Container { accent: None, .. }
+        ));
     }
 
     #[test]
