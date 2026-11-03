@@ -1,6 +1,42 @@
 //! Voice, video, audio settings, shortcuts, desktop integration and connection state.
 
 pub const ENTRIES: &[(&str, &str)] = &[
+    (
+        "Register fastcord:// links",
+        "Зарегистрировать ссылки fastcord://",
+    ),
+    (
+        "Registering fastcord links…",
+        "Регистрация ссылок fastcord…",
+    ),
+    (
+        "fastcord links are registered for this installation.",
+        "Ссылки fastcord зарегистрированы для этой установки.",
+    ),
+    (
+        "Another handler or installation owns fastcord links. Change it in your system settings.",
+        "Ссылки fastcord принадлежат другому обработчику или установке. Измените это в настройках системы.",
+    ),
+    (
+        "This executable path cannot be registered safely.",
+        "Этот путь к приложению нельзя безопасно зарегистрировать.",
+    ),
+    (
+        "Link registration is not supported on this desktop.",
+        "Регистрация ссылок не поддерживается в этой среде.",
+    ),
+    (
+        "Link registration failed. Check your system settings before trying again.",
+        "Не удалось зарегистрировать ссылки. Проверьте настройки системы перед повторной попыткой.",
+    ),
+    (
+        "Open fastcord:// channel and invite links with this installation. Invites still ask you to join.",
+        "Открывать ссылки fastcord:// на каналы и приглашения в этой установке. Вступление по приглашению требует подтверждения.",
+    ),
+    (
+        "Fake mode: link registration is simulated; system settings stay unchanged.",
+        "Тестовый режим: регистрация ссылок имитируется; настройки системы не изменяются.",
+    ),
     ("Waiting for voice keys…", "Ожидание ключей голоса…"),
     (
         "Voice transport connected; waiting for encryption keys. Click to open the call",

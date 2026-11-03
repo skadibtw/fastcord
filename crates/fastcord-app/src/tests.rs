@@ -2169,3 +2169,71 @@ fn sidebar_nickname_tracks_guild_dm_reset_and_account_without_renaming_account_m
     app.ui.status.open = true;
     expect(&app, "Second account", "Second account");
 }
+
+#[test]
+fn registered_app_link_is_navigation_only_and_waits_for_sign_in() {
+    use fastcord_platform::instance::Forwarded;
+    let mut app = login_app();
+    let _ = app.update(Message::Forwarded(Forwarded::Open(
+        "fastcord://-/channels/1/2/3".into(),
+    )));
+    assert_eq!(
+        app.pending_link,
+        desktop::parse("fastcord://-/channels/1/2/3")
+    );
+    for suffix in ["?ack=1", "#reply=hello", "/join", "\" --packet-helper"] {
+        let _ = app.update(Message::Forwarded(Forwarded::Open(format!(
+            "fastcord://-/channels/1/2/3{suffix}"
+        ))));
+        assert_eq!(
+            app.pending_link,
+            desktop::parse("fastcord://-/channels/1/2/3")
+        );
+    }
+    authenticate(&mut app, Persistence::MemoryOnly);
+    assert!(app.pending_link.is_none());
+}
+
+#[test]
+fn link_registration_router_serializes_device_action_across_account_reset() {
+    let mut app = login_app();
+    // Tasks are intentionally discarded: this test never polls OS registration.
+    let _ = app.update(Message::RegisterLinks);
+    assert!(app.link_registration.begin().is_none());
+    let _ = app.update(Message::RegisterLinks);
+    let _ = app.update(Message::LinksRegistered(0, Ok(())));
+    assert!(app.link_registration.begin().is_none());
+    authenticate(&mut app, Persistence::MemoryOnly);
+    let _ = app.update(Message::Account(account_panel::Event::Logout));
+    assert!(
+        app.link_registration.begin().is_none(),
+        "device action survives account teardown"
+    );
+    let _ = app.update(Message::LinksRegistered(
+        1,
+        Err(fastcord_platform::link_handler::Error::Conflict),
+    ));
+    assert_eq!(app.link_registration.begin(), Some(2));
+    let _ = app.update(Message::LinksRegistered(1, Ok(())));
+    assert!(
+        app.link_registration.begin().is_none(),
+        "old result cannot release new request"
+    );
+}
+
+#[test]
+fn app_scheme_invite_opens_preview_without_joining() {
+    use fastcord_platform::instance::Forwarded;
+    let mut app = login_app();
+    authenticate(&mut app, Persistence::MemoryOnly);
+    let _ = app.update(Message::Forwarded(Forwarded::Open(
+        "fastcord://-/invite/fakeinvite".into(),
+    )));
+    assert!(matches!(
+        app.ui.invite.dismiss(),
+        Some(invite::Event::CloseOpened)
+    ));
+    let entry = app.ui.invite.cache.get("fakeinvite").unwrap();
+    assert_eq!(entry.join, invite::Join::Idle);
+    assert_eq!(entry.card, invite::Card::Loading);
+}

@@ -209,6 +209,14 @@ impl App {
                     return self.save_audio_preferences();
                 }
             }
+            Message::RegisterLinks => {
+                if let Some(serial) = self.link_registration.begin() {
+                    return link_registration::task(serial, fake_mode());
+                }
+            }
+            Message::LinksRegistered(serial, result) => {
+                self.link_registration.finish(serial, result);
+            }
             Message::AutostartToggled(on) => {
                 if !self.autostart_busy {
                     self.autostart_busy = true;
