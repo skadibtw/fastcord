@@ -1813,7 +1813,7 @@ impl App {
                         };
                         Message::Events(scheduled_events::Event::Open(guild))
                     }
-                    "event-details" | "event-users" => {
+                    "event-details" | "event-users" | "event-edit" => {
                         let Some(event) = self
                             .phase
                             .gateway()
@@ -1824,15 +1824,25 @@ impl App {
                         };
                         Message::Events(if panel == "event-details" {
                             scheduled_events::Event::Show(event)
+                        } else if panel == "event-edit" {
+                            scheduled_events::Event::Edit(event)
                         } else {
                             scheduled_events::Event::ShowUsers(event)
                         })
                     }
                     "event-users-next" => Message::Events(scheduled_events::Event::NextUsers),
                     "event-new" => Message::Events(scheduled_events::Event::New),
-                    "event-weekly" => Message::Events(scheduled_events::Event::Repeat(Some(
-                        fastcord_discord::EventRecurrence::Weekly,
-                    ))),
+                    "event-weekly" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Replace(
+                            fastcord_discord::EventRecurrence::Weekly,
+                        ),
+                    )),
+                    "event-once" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Clear,
+                    )),
+                    "event-keep-repeat" => Message::Events(scheduled_events::Event::Repeat(
+                        fastcord_discord::EventRecurrenceChange::Keep,
+                    )),
                     "community-setup" => {
                         let Some(guild) = self
                             .phase
