@@ -690,10 +690,15 @@ mod tests {
 
     #[test]
     fn component_text_script_step_is_bounded() {
-        let steps = parse_script("component-text reveal 10 0 0\n", std::path::Path::new("."));
+        let steps =
+            parse_script("component-text reveal 10 0 0\n", std::path::Path::new(".")).unwrap();
         assert!(matches!(&steps[0].1,Step::ComponentText(command) if command=="reveal 10 0 0"));
         let too_long = format!("component-text {}", "x".repeat(129));
-        assert!(parse_script(&too_long, std::path::Path::new(".")).is_empty());
+        assert!(
+            parse_script(&too_long, std::path::Path::new("."))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
