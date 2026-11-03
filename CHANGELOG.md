@@ -35,6 +35,7 @@
 - Let Community onboarding role and channel checklists use the available form width and reserve space for their scrollbars, keeping labels such as Moderator readable while long names wrap (#252).
 - Show the selected server’s held nickname in the sidebar identity, with the global name in DMs and the account menu; no nickname or settings write is sent (#106).
 - Preserve shutdown requests across delayed legacy byedpi startup, retry failed shutdown wakes and retain exclusive engine ownership until the worker joins (#259).
+- Bound each Unix second-launch handoff by one total deadline and validate private runtime directories and lock files before use; drain buffered requests after a Darwin sender closes (#265, #266).
 - Check A/V scheduling at the decoder presentation sink so a delayed test receiver does not fail correctly timed output on CI.
 - Preserve the account's voice-volume writer, pending values and save-status stream across manual Gateway reconnects, preventing stale detached writes from overwriting newer settings or restoring logged-out rows (#181).
 - Compile the VA-API-only RBSP bit-length helper only on Linux, keeping Windows and macOS all-target test builds clean under warnings-as-errors.
