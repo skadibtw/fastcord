@@ -138,6 +138,17 @@ pub fn handle(world: &mut World, req: &Request, ctx: &Ctx) -> Outcome {
             ok(fixture)
         }
 
+        ("GET", ["guilds", guild, "application-command-index"]) => {
+            if world.guild_index(guild).is_none() {
+                return error(404, 10004, "Unknown Guild");
+            }
+            // Read-only offline UI fixture. POST /interactions stays unimplemented.
+            ok(serde_json::from_str(include_str!(
+                "../../../fixtures/rest/application-command-index.json"
+            ))
+            .expect("static command index fixture"))
+        }
+
         ("GET", ["channels", channel, "messages"]) => history(world, channel, &get),
         ("GET", ["channels", channel, "messages", "pins"])
         | ("GET", ["channels", channel, "pins"]) => pins(world, channel),
@@ -1409,6 +1420,39 @@ mod tests {
         assert_eq!(login(&mut w, "captcha@fake.test", Some("k")).status, 200);
         assert_eq!(login(&mut w, "wrong@fake.test", None).status, 400);
         assert_eq!(login(&mut w, "limited@fake.test", None).status, 429);
+    }
+
+    #[test]
+    fn command_index_fixture_is_scoped_and_does_not_invent_interaction_success() {
+        let mut world = world();
+        let response = call(
+            &mut world,
+            "GET",
+            "/guilds/5001/application-command-index",
+            None,
+        );
+        assert_eq!(response.response.status, 200);
+        let index =
+            fastcord_discord::parse_command_index(&serde_json::to_vec(&body(&response)).unwrap())
+                .unwrap();
+        assert!(index.commands.iter().any(|command| command.name == "admin"));
+        assert_eq!(
+            call(
+                &mut world,
+                "GET",
+                "/guilds/999999/application-command-index",
+                None
+            )
+            .response
+            .status,
+            404
+        );
+        assert_eq!(
+            call(&mut world, "POST", "/interactions", Some(json!({"type":2})))
+                .response
+                .status,
+            404
+        );
     }
 
     #[test]

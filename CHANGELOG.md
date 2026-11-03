@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Grouped slash-command forms with scoped group/subcommand controls and explicit Run. Command trees are validated and budgeted before typed allocation; obsolete branch fields clear visibly. Interaction routes remain unverified and gated off by default (#100).
+
 ### Fixed
 - Reject scripted launches without a valid fake loopback origin before GUI or account startup; validate missing script/port inputs and keep script streams and dispatch inert outside fake mode (#241).
 - Reject nonfinite, overflowing or overlong fake-script waits before running actions; accumulated pauses are capped at ten minutes and invalid waits fail the run instead of panicking its task (#240).

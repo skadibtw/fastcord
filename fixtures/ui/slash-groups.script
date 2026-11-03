@@ -1,0 +1,28 @@
+# Native fake-mode layout/reducer scenario; no live account or interoperability claim.
+# Use isolated application data and a local fake server; inspect screenshots AND logs.
+wait 2
+open discord://-/channels/5001/6005
+wait 1
+size 1080 720
+slash type /admin
+wait 1
+snap slash-groups-index
+slash pick 1300000000000000005
+snap slash-groups-root
+slash group 0
+snap slash-groups-group
+slash sub 0
+snap slash-groups-fields
+slash field 0 2
+slash field 1 previous branch draft
+snap slash-groups-filled
+slash group 1
+snap slash-groups-cleared
+slash sub 0
+slash field 0 true
+snap slash-groups-ready
+slash run
+wait 1
+# Fake intentionally refuses POST /interactions; inspect one request and visible failure.
+snap slash-groups-refused
+quit

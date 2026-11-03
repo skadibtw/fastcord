@@ -41,13 +41,83 @@
       "description": ""
     },
     {
-      "id": "1300000000000000005", "application_id": "9000000000000000002",
-      "version": "1300000000000000015", "type": 1, "name": "admin",
-      "description": "Groups are not supported",
+      "id": "1300000000000000005",
+      "application_id": "9000000000000000002",
+      "version": "1300000000000000015",
+      "type": 1,
+      "name": "admin",
+      "description": "Grouped command fixture (offline only)",
       "options": [
-        {"type": 2, "name": "group", "description": "g", "options": [
-          {"type": 1, "name": "sub", "description": "s"}
-        ]}
+        {
+          "type": 2,
+          "name": "group",
+          "description": "Manage the fixture",
+          "options": [
+            {
+              "type": 1,
+              "name": "sub",
+              "description": "Choose a sample level",
+              "options": [
+                {
+                  "type": 4,
+                  "name": "level",
+                  "description": "Required level",
+                  "required": true,
+                  "choices": [
+                    {
+                      "name": "Basic",
+                      "value": 1
+                    },
+                    {
+                      "name": "Detailed",
+                      "value": 2
+                    }
+                  ]
+                },
+                {
+                  "type": 3,
+                  "name": "note",
+                  "description": "Optional note"
+                },
+                {
+                  "type": 11,
+                  "name": "picture",
+                  "description": "Unsupported optional file"
+                }
+              ]
+            },
+            {
+              "type": 1,
+              "name": "status",
+              "description": "No arguments"
+            }
+          ]
+        },
+        {
+          "type": 2,
+          "name": "other",
+          "description": "A different group",
+          "options": [
+            {
+              "type": 1,
+              "name": "sub",
+              "description": "Same leaf name, different group",
+              "options": [
+                {
+                  "type": 5,
+                  "name": "enabled",
+                  "required": true,
+                  "description": "Enable fixture"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": 1,
+          "name": "ping",
+          "description": "Ungrouped sibling"
+        }
       ]
     },
     {
