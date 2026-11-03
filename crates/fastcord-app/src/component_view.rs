@@ -155,15 +155,20 @@ struct Cx<'a> {
     choices: Option<Choices>,
     entity_target: Option<crate::entity_select::Target>,
     next_select: std::cell::Cell<usize>,
+    next_text: std::cell::Cell<u16>,
+    text: Option<crate::component_text::View<'a>>,
+    row: &'a Row,
+    owner: Option<(Snowflake, u64, u64)>,
 }
 
 /// All components of a row's message.
-pub fn view(
-    row: &Row,
+pub fn view<'a>(
+    row: &'a Row,
     channel_id: Snowflake,
     choices: Option<Choices>,
     owner: Option<(Snowflake, u64, u64)>,
-) -> Element<'_, Event> {
+    text: Option<crate::component_text::View<'a>>,
+) -> Element<'a, Event> {
     let cx = Cx {
         channel_id,
         message_id: row.message.id,
@@ -174,6 +179,10 @@ pub fn view(
             .filter(|_| row.message.component_application().is_some())
             .map(|owner| crate::entity_select::Target::for_row(row, owner, 0)),
         next_select: std::cell::Cell::new(0),
+        next_text: std::cell::Cell::new(0),
+        text,
+        row,
+        owner,
     };
     column(row.message.components.iter().map(|c| component(c, &cx)))
         .spacing(4)
@@ -192,10 +201,27 @@ fn component<'a>(item: &'a Component, cx: &Cx<'a>) -> Element<'a, Event> {
             cx.next_select.set(index + 1);
             select(s, cx, index)
         }
-        Component::Text(content) => text(content.as_str())
-            .size(14)
-            .wrapping(text::Wrapping::WordOrGlyph)
-            .into(),
+        Component::Text(content) => {
+            let ordinal = cx.next_text.get();
+            cx.next_text.set(ordinal + 1);
+            if let (Some(view), Some(owner)) = (cx.text, cx.owner) {
+                crate::rich::component(
+                    content,
+                    &cx.row.message,
+                    crate::component_text::Target::for_row(cx.row, owner, ordinal),
+                    view,
+                )
+            } else {
+                text(if content.contains("||") {
+                    tr("Hidden spoiler content")
+                } else {
+                    content.as_str()
+                })
+                .size(14)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .into()
+            }
+        }
         Component::Section { body, accessory } => {
             let mut line = row![
                 column(body.iter().map(|c| component(c, cx)))
@@ -418,7 +444,7 @@ mod tests {
 
     /// Every event the message's controls can send now.
     fn pressable(row: &Row) -> Vec<Event> {
-        let _ = view(row, Snowflake(5), None, None);
+        let _ = view(row, Snowflake(5), None, None, None);
         let cx = Cx {
             channel_id: Snowflake(5),
             message_id: Snowflake(7),
@@ -427,6 +453,10 @@ mod tests {
             choices: None,
             entity_target: None,
             next_select: std::cell::Cell::new(0),
+            next_text: std::cell::Cell::new(0),
+            text: None,
+            row,
+            owner: None,
         };
         fn walk(items: &[Component], cx: &Cx<'_>, found: &mut Vec<Event>) {
             for item in items {
@@ -491,7 +521,7 @@ mod tests {
             let mut ui = crate::variable_list::harness::Ui::new(
                 320.0,
                 200.0,
-                view(&visible, Snowflake(5), None, None),
+                view(&visible, Snowflake(5), None, None, None),
             );
             assert!(
                 ui.layout_height() > 32.0 && ui.layout_height() < 100.0,
@@ -556,7 +586,7 @@ mod tests {
         let mut ui = crate::variable_list::harness::Ui::new(
             320.0,
             200.0,
-            view(&hidden, Snowflake(5), None, None),
+            view(&hidden, Snowflake(5), None, None, None),
         );
         ui.redraw();
         ui.draw();
@@ -730,7 +760,7 @@ mod tests {
             mask: 3,
         };
         let clickable = |choices| {
-            let mut ui = Ui::new(400.0, 400.0, view(&row, Snowflake(5), choices, None));
+            let mut ui = Ui::new(400.0, 400.0, view(&row, Snowflake(5), choices, None, None));
             ui.redraw();
             ui.draw();
             let mut found = Vec::new();
@@ -772,6 +802,6 @@ mod tests {
             {"type": 9, "components": [{"type": 10, "content": "side"}],
              "accessory": {"type": 2, "style": 1, "label": "Go", "custom_id": "go"}}
         ]}]);
-        let _ = view(&row_with(list, None), Snowflake(5), None, None);
+        let _ = view(&row_with(list, None), Snowflake(5), None, None, None);
     }
 }

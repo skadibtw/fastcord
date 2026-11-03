@@ -830,6 +830,7 @@ impl App {
                     emojis: &gateway.emoji.views,
                     avatars: &gateway.avatars.views,
                     revealed: &gateway.revealed,
+                    component_text: &gateway.component_text,
                     invites: &self.ui.invite.cache,
                     members: if gateway.directs {
                         &NO_MEMBERS
