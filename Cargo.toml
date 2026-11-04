@@ -13,7 +13,7 @@ block = { path = "vendor/block" }
 coreaudio-rs = { path = "vendor/coreaudio-rs" }
 
 [workspace.package]
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-only"
